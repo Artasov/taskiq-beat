@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskiq-beat"
+version = "0.1.0"
+description = "A database-backed scheduler and beat engine for Taskiq."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "xlartas" },
+]
+keywords = [
+    "taskiq",
+    "beat",
+    "scheduler",
+    "cron",
+    "crontab",
+    "interval",
+    "sqlalchemy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "sqlalchemy>=2.0.0",
+    "taskiq>=0.12.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "aiosqlite>=0.20.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=1.0.0",
+]
+dev = [
+    "aiosqlite>=0.20.0",
+    "build>=1.2.2",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=1.0.0",
+    "twine>=6.1.0",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+exclude = ["tests", "tests.*"]
+
+[tool.setuptools.package-data]
+taskiq_beat = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
