@@ -18,6 +18,13 @@ class JobRepository:
         return await session.get(SchedulerJob, job_id)
 
     @classmethod
+    async def list_by_ids(cls, session: AsyncSession, job_ids: list[str]) -> list[SchedulerJob]:
+        if not job_ids:
+            return []
+        query = select(SchedulerJob).where(SchedulerJob.id.in_(job_ids))
+        return list((await session.execute(query)).scalars())
+
+    @classmethod
     async def list_active(cls, session: AsyncSession) -> list[SchedulerJob]:
         query = (
             select(SchedulerJob)
@@ -33,3 +40,10 @@ class RunRepository:
         session.add(run)
         await session.flush()
         return run
+
+    @classmethod
+    async def create_many(cls, session: AsyncSession, runs: list[SchedulerRun]) -> None:
+        if not runs:
+            return
+        session.add_all(runs)
+        await session.flush()

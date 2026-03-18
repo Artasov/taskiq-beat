@@ -5,8 +5,7 @@ import heapq
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any
 
 from taskiq_beat.config import SchedulerConfig
 from taskiq_beat.models import SchedulerJob, SchedulerRun
@@ -40,6 +39,27 @@ class SchedulerJobState:
             next_run_at=next_run_at,
             updated_at=job.updated_at.astimezone(UTC),
         )
+
+
+@dataclass(slots=True, frozen=True)
+class PreparedDispatch:
+    job_id: str
+    task_name: str
+    task: Any
+    trigger: Any
+    args: list[Any]
+    kwargs: dict[str, Any]
+    scheduled_for: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class DispatchOutcome:
+    job_id: str
+    status: str
+    broker_task_id: str | None = None
+    error: str | None = None
+    dispatched_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class SchedulerEngine:
@@ -148,8 +168,16 @@ class SchedulerEngine:
         self.wakeup_event.set()
 
     async def dispatch_due_jobs(self) -> None:
-        current_time = datetime.now(UTC)
-        while self.heap and self.heap[0].next_run_at <= current_time:
+        while True:
+            current_time = datetime.now(UTC)
+            due_jobs = self.collect_due_jobs(current_time)
+            if not due_jobs:
+                return
+            await self.dispatch_jobs_batch(due_jobs, current_time)
+
+    def collect_due_jobs(self, current_time: datetime) -> list[SchedulerJobState]:
+        due_jobs: list[SchedulerJobState] = []
+        while self.heap and self.heap[0].next_run_at <= current_time and len(due_jobs) < self.config.dispatch_batch_size:
             item = heapq.heappop(self.heap)
             job = self.jobs.get(item.job_id)
             if job is None:
@@ -158,83 +186,154 @@ class SchedulerEngine:
                 continue
             if job.updated_at != item.updated_at or job.next_run_at != item.next_run_at:
                 continue
-            await self.dispatch_job(job)
+            due_jobs.append(job)
+        return due_jobs
 
-    async def dispatch_job(self, cached_job: SchedulerJobState) -> None:
-        current_time = datetime.now(UTC)
+    async def dispatch_jobs_batch(self, cached_jobs: list[SchedulerJobState], current_time: datetime) -> None:
         async with self.session_factory() as session:
-            job = await JobRepository.get_by_id(session, cached_job.job_id)
-            if job is None:
-                await session.rollback()
-                self.remove_job(cached_job.job_id)
-                return
-            if not job.is_enabled or job.next_run_at is None:
-                await session.rollback()
-                self.upsert_job(job)
-                return
-            if (
-                job.updated_at.astimezone(UTC) != cached_job.updated_at
-                or job.next_run_at.astimezone(UTC) != cached_job.next_run_at
-            ):
-                self.upsert_job(job)
+            jobs = await JobRepository.list_by_ids(session, [job.job_id for job in cached_jobs])
+            jobs_by_id = {str(job.id): job for job in jobs}
+
+            runnable_jobs: list[SchedulerJob] = []
+            prepared_dispatches: list[PreparedDispatch] = []
+
+            for cached_job in cached_jobs:
+                job = jobs_by_id.get(cached_job.job_id)
+                if job is None:
+                    self.remove_job(cached_job.job_id)
+                    continue
+                if not job.is_enabled or job.next_run_at is None:
+                    self.upsert_job(job)
+                    continue
+                if (
+                    job.updated_at.astimezone(UTC) != cached_job.updated_at
+                    or job.next_run_at.astimezone(UTC) != cached_job.next_run_at
+                ):
+                    self.upsert_job(job)
+                    continue
+
+                runnable_jobs.append(job)
+                prepared_dispatches.append(
+                    PreparedDispatch(
+                        job_id=str(job.id),
+                        task_name=job.task_name,
+                        task=self.registry.get_task(job.task_name),
+                        trigger=Scheduler.build_trigger(job),
+                        args=list(job.task_args or []),
+                        kwargs=dict(job.task_kwargs or {}),
+                        scheduled_for=job.next_run_at,
+                    )
+                )
+
+            if not prepared_dispatches:
                 await session.rollback()
                 return
 
-            await self.dispatch_job_in_session(session, job, current_time)
+            outcomes = await self.execute_prepared_dispatches(prepared_dispatches)
+            runs_to_create: list[SchedulerRun] = []
+
+            for job, prepared, outcome in zip(runnable_jobs, prepared_dispatches, outcomes, strict=True):
+                self.apply_dispatch_outcome(
+                    job=job,
+                    prepared=prepared,
+                    outcome=outcome,
+                    current_time=current_time,
+                    runs_to_create=runs_to_create,
+                )
+
+            if self.config.record_runs:
+                await RunRepository.create_many(session, runs_to_create)
+
             await session.commit()
-            self.upsert_job(job) if job.is_enabled and job.next_run_at is not None else self.remove_job(str(job.id))
 
-    async def dispatch_job_in_session(self, session: AsyncSession, job: SchedulerJob, current_time: datetime) -> None:
-        task = self.registry.get_task(job.task_name)
-        trigger = Scheduler.build_trigger(job)
-        scheduled_for = job.next_run_at
+            for job in runnable_jobs:
+                self.upsert_job(job) if job.is_enabled and job.next_run_at is not None else self.remove_job(str(job.id))
 
-        try:
-            broker_task = await task.kiq(*list(job.task_args or []), **dict(job.task_kwargs or {}))
-        except Exception as exc:
-            job.last_error = str(exc)
-            job.next_run_at = current_time + timedelta(seconds=self.config.dispatch_retry_seconds)
-            job.updated_at = current_time
-            await RunRepository.create(
-                session,
-                SchedulerRun(
-                    job_id=job.id,
-                    status="failed",
-                    scheduled_for=scheduled_for or current_time,
-                    finished_at=current_time,
-                    error=str(exc),
-                    created_at=current_time,
-                    updated_at=current_time,
-                ),
-            )
-            log.exception("Scheduler dispatch failed for %s", job.task_name)
+    async def execute_prepared_dispatches(self, prepared_dispatches: list[PreparedDispatch]) -> list[DispatchOutcome]:
+        semaphore = asyncio.Semaphore(self.config.dispatch_concurrency)
+
+        async def run_single(prepared: PreparedDispatch) -> DispatchOutcome:
+            async with semaphore:
+                dispatched_at = datetime.now(UTC)
+                try:
+                    broker_task = await prepared.task.kiq(*prepared.args, **prepared.kwargs)
+                except Exception as exc:
+                    finished_at = datetime.now(UTC)
+                    log.exception("Scheduler dispatch failed for %s", prepared.task_name)
+                    return DispatchOutcome(
+                        job_id=prepared.job_id,
+                        status="failed",
+                        error=str(exc),
+                        dispatched_at=dispatched_at,
+                        finished_at=finished_at,
+                    )
+                finished_at = datetime.now(UTC)
+                return DispatchOutcome(
+                    job_id=prepared.job_id,
+                    status="dispatched",
+                    broker_task_id=getattr(broker_task, "task_id", None),
+                    dispatched_at=dispatched_at,
+                    finished_at=finished_at,
+                )
+
+        return list(await asyncio.gather(*(run_single(prepared) for prepared in prepared_dispatches)))
+
+    def apply_dispatch_outcome(
+        self,
+        *,
+        job: SchedulerJob,
+        prepared: PreparedDispatch,
+        outcome: DispatchOutcome,
+        current_time: datetime,
+        runs_to_create: list[SchedulerRun],
+    ) -> None:
+        if outcome.status == "failed":
+            retry_from = outcome.finished_at or outcome.dispatched_at or current_time
+            job.last_error = outcome.error
+            job.next_run_at = retry_from + timedelta(seconds=self.config.dispatch_retry_seconds)
+            job.updated_at = retry_from
+            if self.config.record_runs:
+                runs_to_create.append(
+                    SchedulerRun(
+                        job_id=job.id,
+                        status="failed",
+                        scheduled_for=prepared.scheduled_for,
+                        dispatched_at=outcome.dispatched_at,
+                        finished_at=outcome.finished_at or retry_from,
+                        error=outcome.error,
+                        created_at=retry_from,
+                        updated_at=retry_from,
+                    )
+                )
             return
 
+        dispatched_at = outcome.dispatched_at or current_time
+        finished_at = outcome.finished_at or dispatched_at
         job.last_error = None
-        job.last_run_at = current_time
-        job.last_dispatched_task_id = getattr(broker_task, "task_id", None)
+        job.last_run_at = dispatched_at
+        job.last_dispatched_task_id = outcome.broker_task_id
         job.dispatch_count += 1
-        job.updated_at = current_time
+        job.updated_at = finished_at
 
         if job.kind == "one_off":
             job.is_enabled = False
             job.next_run_at = None
         else:
-            next_run_at = trigger.get_next_run_at(current_time, anchor=job.created_at)
+            next_run_at = prepared.trigger.get_next_run_at(dispatched_at, anchor=job.created_at)
             job.next_run_at = next_run_at
             if next_run_at is None:
                 job.is_enabled = False
 
-        await RunRepository.create(
-            session,
-            SchedulerRun(
-                job_id=job.id,
-                status="dispatched",
-                scheduled_for=scheduled_for or current_time,
-                dispatched_at=current_time,
-                finished_at=current_time,
-                broker_task_id=getattr(broker_task, "task_id", None),
-                created_at=current_time,
-                updated_at=current_time,
-            ),
-        )
+        if self.config.record_runs:
+            runs_to_create.append(
+                SchedulerRun(
+                    job_id=job.id,
+                    status="dispatched",
+                    scheduled_for=prepared.scheduled_for,
+                    dispatched_at=dispatched_at,
+                    finished_at=finished_at,
+                    broker_task_id=outcome.broker_task_id,
+                    created_at=finished_at,
+                    updated_at=finished_at,
+                )
+            )

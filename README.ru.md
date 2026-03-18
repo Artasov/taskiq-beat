@@ -1,8 +1,8 @@
 ﻿# taskiq-beat
 
 <div align="center">
-  <p><strong>Database-backed scheduler for Taskiq</strong></p>
-  <p>One active scheduler process per database</p>
+  <p><strong>Планировщик для Taskiq с хранением расписания и истории запусков в базе данных</strong></p>
+  <p>Один активный scheduler process на одну базу данных</p>
 </div>
 
 <div align="center">
@@ -15,32 +15,30 @@
 </div>
 
 <div align="center">
-  <a href="./scripts/README.md">Scripts README</a>
+  <a href="./scripts/README.md">README для scripts</a>
 </div>
 
-## Navigation
+## Навигация
 
-- [Quick start](#quick-start)
-- [Run with FastAPI](#run-with-fastapi)
-- [Create jobs](#create-jobs)
-- [Manage jobs](#manage-jobs)
-- [Using SchedulerConfig](#using-schedulerconfig)
+- [Быстрый старт](#быстрый-старт)
+- [Запуск с FastAPI](#запуск-с-fastapi)
+- [Создание job](#создание-job)
+- [Управление job](#управление-job)
 - [Alembic](#alembic)
-- [Default configuration](#default-configuration)
-- [Create tables manually](#create-tables-manually)
-- [Load testing](#load-testing)
+- [Конфигурация по умолчанию](#конфигурация-по-умолчанию)
+- [Создание таблиц вручную](#создание-таблиц-вручную)
+- [Нагрузочный тест](#нагрузочный-тест)
 
-## Installation
+## Установка
 
 ```bash
 pip install taskiq-beat
 ```
 
-> Optional extras:
-> - tests: `pip install "taskiq-beat[test]"`
-> - local dev: `pip install "taskiq-beat[dev]"`
+> `pip install "taskiq-beat[test]"`</br>
+> `pip install "taskiq-beat[dev]"`
 
-## Quick start
+## Быстрый старт
 
 ```python
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -53,14 +51,14 @@ from taskiq_beat import (
     SchedulerConfig,
 )
 
-# SQLAlchemy engine connected to your database.
+# SQLAlchemy engine для подключения к базе.
 engine = create_async_engine("sqlite+aiosqlite:///scheduler.sqlite3")
 
-# Factory that creates AsyncSession objects.
-# Scheduler methods use these sessions for all DB operations.
+# Фабрика, которая создаёт AsyncSession.
+# Через эти сессии scheduler работает с базой данных.
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-# Taskiq broker. InMemoryBroker is only for a minimal example.
+# Taskiq broker. InMemoryBroker здесь только для простого примера.
 broker = InMemoryBroker()
 
 
@@ -69,7 +67,7 @@ async def heartbeat_task() -> None:
     print("tick")
 
 
-# Main taskiq-beat entry point.
+# Главная точка входа taskiq-beat.
 scheduler_app = SchedulerApp(
     broker=broker,
     session_factory=session_factory,
@@ -77,44 +75,19 @@ scheduler_app = SchedulerApp(
 )
 ```
 
-## Using SchedulerConfig
+## Запуск с FastAPI
 
-Pass it to `SchedulerApp(config=...)`.
+Scheduler можно запускать:
 
-```python
-from taskiq_beat import SchedulerApp, SchedulerConfig
+- внутри FastAPI process
+- отдельным process/service
 
-scheduler_app = SchedulerApp(
-    broker=broker,
-    session_factory=session_factory,
-    config=SchedulerConfig(
-        sync_interval_seconds=2.0,
-        idle_sleep_seconds=0.1,
-        dispatch_retry_seconds=10,
-        dispatch_concurrency=32,
-        dispatch_batch_size=256,
-        record_runs=True,
-        default_timezone="UTC",
-    ),
-)
-```
+Можно и так, и так. Главное правило: не запускать несколько scheduler processes на одну и ту же базу.
 
-Use this when you want to tune throughput, retry behavior, polling interval, or disable run history writes.
-
-## Run with FastAPI
-
-You can run the scheduler:
-
-- inside the FastAPI process
-- or as a separate process/service
-
-Both are valid. The main rule is: only one scheduler process should work with the same database.
-
-FastAPI example:
+Пример c FastAPI:
 
 ```python
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from taskiq import InMemoryBroker
@@ -127,7 +100,22 @@ broker = InMemoryBroker()
 scheduler_app = SchedulerApp(
     broker=broker,
     session_factory=session_factory,
-    config=SchedulerConfig(),
+    config=SchedulerConfig(
+        # Как часто scheduler перечитывает активные job из базы данных.
+        sync_interval_seconds=1.0,
+        # Минимальная пауза между итерациями scheduler loop.
+        idle_sleep_seconds=0.2,
+        # Через сколько секунд повторить dispatch после ошибки в task.kiq(...).
+        dispatch_retry_seconds=5,
+        # Сколько job можно dispatch'ить параллельно внутри одного batch.
+        dispatch_concurrency=32,
+        # Сколько due job максимум забирать из heap за один batch.
+        dispatch_batch_size=256,
+        # Нужно ли писать строки истории в SchedulerRun.
+        record_runs=True,
+        # Базовая timezone для helper API, если явно не указана другая.
+        default_timezone="UTC",
+    ),
 )
 
 
@@ -145,7 +133,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 ```
 
-## Create jobs
+## Создание job
 
 ### Interval job
 
@@ -160,11 +148,11 @@ async with session_factory() as session:
     )
     job = await scheduler.schedule(session)
 
-print(job.id)
+print(job.id)  # Например: "6c6342d8-6d74-4d16-8f7a-5d4f1b3a0b13"
 ```
 
-`await scheduler.schedule(session)` returns `SchedulerJob`. Use `job.id` later to pause, resume, run immediately, or delete the job.
-It is a SQLAlchemy model instance with fields such as:
+`await scheduler.schedule(session)` возвращает `SchedulerJob`.
+Это SQLAlchemy model instance с полями вроде:
 
 - `job.id`
 - `job.task_name`
@@ -173,7 +161,7 @@ It is a SQLAlchemy model instance with fields such as:
 - `job.next_run_at`
 - `job.is_enabled`
 
-In practice, `job.id` is the field you use later for pause, resume, run-now, and delete.
+Чаще всего дальше используется именно `job.id` для pause, resume, run-now и delete.
 
 ### One-off job
 
@@ -207,12 +195,12 @@ async with session_factory() as session:
     job = await scheduler.schedule(session)
 ```
 
-## Manage jobs
+## Управление job
 
-You need:
+Что нужно:
 
-- `session_factory()` to open an `AsyncSession`
-- `job.id` from the result of `await scheduler.schedule(session)`
+- `session_factory()`, чтобы открыть `AsyncSession`
+- `job.id`, который обычно берётся из результата `await scheduler.schedule(session)`
 
 ```python
 async with session_factory() as session:
@@ -224,7 +212,7 @@ async with session_factory() as session:
 
 ## Alembic
 
-If you already have your own SQLAlchemy models, add `SchedulerBase.metadata` to `target_metadata`.
+Чтобы Alembic увидел таблицы scheduler'а, добавь `SchedulerBase.metadata` в `target_metadata`.
 
 `alembic/env.py`:
 
@@ -233,12 +221,14 @@ from myapp.db import Base
 from taskiq_beat import SchedulerBase
 
 target_metadata = [
+    # Твоя основная ORM metadata.
     Base.metadata,
+    # Metadata из taskiq-beat.
     SchedulerBase.metadata,
 ]
 ```
 
-Copy-paste flow:
+Команды, которые можно просто скопировать:
 
 ```bash
 pip install alembic
@@ -247,49 +237,14 @@ alembic revision --autogenerate -m "add taskiq beat tables"
 alembic upgrade head
 ```
 
-Alembic should detect:
+Alembic должен обнаружить:
 
 - `scheduler_job`
 - `scheduler_run`
 
-If your project has only taskiq-beat tables:
+## Создание таблиц вручную
 
-```python
-from taskiq_beat import SchedulerBase
-
-target_metadata = SchedulerBase.metadata
-```
-
-## Default configuration
-
-```python
-SchedulerConfig(
-    # How often the scheduler reloads active jobs from the database.
-    sync_interval_seconds=1.0,
-
-    # Minimum sleep between loop iterations.
-    idle_sleep_seconds=0.2,
-
-    # Delay before retrying a failed dispatch.
-    dispatch_retry_seconds=5,
-
-    # Maximum number of jobs dispatched concurrently inside one batch.
-    dispatch_concurrency=32,
-
-    # Maximum number of due jobs taken from the heap in one batch.
-    dispatch_batch_size=256,
-
-    # Whether to write SchedulerRun history rows.
-    record_runs=True,
-
-    # Default timezone used by helper APIs when no timezone is specified.
-    default_timezone="UTC",
-)
-```
-
-## Create tables manually
-
-Use this only for local setup, quick experiments, or tests.
+Используй это только для локального запуска, тестов и быстрых экспериментов.
 
 ```python
 from taskiq_beat import SchedulerBase
@@ -298,21 +253,17 @@ async with engine.begin() as connection:
     await connection.run_sync(SchedulerBase.metadata.create_all)
 ```
 
-This creates:
+Будут созданы таблицы:
 
 - `scheduler_job`
 - `scheduler_run`
 
-## Load testing
+## Нагрузочный тест
 
-See [scripts/README.md](./scripts/README.md).
+Смотри [scripts/README.md](./scripts/README.md).
 
-## Testing
+## Тестирование
 
 ```bash
 pytest
 ```
-
-## Release
-
-See [`release_guide`](./release_guide).
