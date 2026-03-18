@@ -1,8 +1,5 @@
-﻿# taskiq-beat
-
-<div align="center">
-  <p><strong>Планировщик для Taskiq с хранением расписания и истории запусков в базе данных</strong></p>
-  <p>Один активный scheduler process на одну базу данных</p>
+﻿<div align="center">
+  <h1>taskiq-beat</h1>
 </div>
 
 <div align="center">
@@ -12,15 +9,14 @@
   <a href="./README.ru.md">
     <img src="https://img.shields.io/badge/Русский-red?style=for-the-badge" alt="Русский">
   </a>
-</div>
+</div>  
 
-<div align="center">
-  <a href="./scripts/README.md">README для scripts</a>
-</div>
+### Планировщик для Taskiq с хранением расписания и истории запусков в базе данных
 
 ## Навигация
 
 - [Быстрый старт](#быстрый-старт)
+- [Как это запускать](#как-это-запускать)
 - [Запуск с FastAPI](#запуск-с-fastapi)
 - [Создание job](#создание-job)
 - [Управление job](#управление-job)
@@ -37,6 +33,9 @@ pip install taskiq-beat
 
 > `pip install "taskiq-beat[test]"`</br>
 > `pip install "taskiq-beat[dev]"`
+
+`taskiq-beat` сам по себе не даёт сетевой broker. Для реального запуска в нескольких process обычно нужен ещё broker
+backend из экосистемы Taskiq.
 
 ## Быстрый старт
 
@@ -58,7 +57,8 @@ engine = create_async_engine("sqlite+aiosqlite:///scheduler.sqlite3")
 # Через эти сессии scheduler работает с базой данных.
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-# Taskiq broker. InMemoryBroker здесь только для простого примера.
+# Taskiq broker для демонстрации API.
+# InMemoryBroker не подходит для сценария с отдельным worker process.
 broker = InMemoryBroker()
 
 
@@ -68,35 +68,6 @@ async def heartbeat_task() -> None:
 
 
 # Главная точка входа taskiq-beat.
-scheduler_app = SchedulerApp(
-    broker=broker,
-    session_factory=session_factory,
-    config=SchedulerConfig(),
-)
-```
-
-## Запуск с FastAPI
-
-Scheduler можно запускать:
-
-- внутри FastAPI process
-- отдельным process/service
-
-Можно и так, и так. Главное правило: не запускать несколько scheduler processes на одну и ту же базу.
-
-Пример c FastAPI:
-
-```python
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from taskiq import InMemoryBroker
-
-from taskiq_beat import SchedulerApp, SchedulerConfig
-
-engine = create_async_engine("sqlite+aiosqlite:///scheduler.sqlite3")
-session_factory = async_sessionmaker(engine, expire_on_commit=False)
-broker = InMemoryBroker()
 scheduler_app = SchedulerApp(
     broker=broker,
     session_factory=session_factory,
@@ -117,6 +88,82 @@ scheduler_app = SchedulerApp(
         default_timezone="UTC",
     ),
 )
+```
+
+Этот пример только показывает, как собрать `broker`, `session_factory` и `scheduler_app`.
+Он ещё не означает, что задачи уже начнут выполняться в отдельном process.
+
+## Как это запускать
+
+Из примера выше создаются только объекты Python. Этого ещё недостаточно, чтобы система начала работать сама по себе.
+
+Что нужно в реальном приложении:
+
+1. Поднять process с `scheduler_app.start()`.
+2. Поднять Taskiq worker process, который будет забирать задачи из broker.
+3. Создавать job через `scheduler_app.create_scheduler(...).schedule(session)`.
+
+Важно:
+
+- `InMemoryBroker` в примерах подходит только для демонстрации API, тестов и локальных экспериментов внутри одного
+  process.
+- Если ты хочешь отдельный worker в другом терминале или service, нужен настоящий broker backend.
+- Worker обычно запускается в отдельном терминале или отдельном service/process.
+- Команда `python -m taskiq worker app.main:broker` означает: импортировать объект `broker` из модуля `app.main` и
+  слушать его очередь.
+
+Типичный сценарий:
+
+- терминал 1: FastAPI с `scheduler_app.start()` внутри lifespan
+- терминал 2: Taskiq worker
+- терминал 3: запросы в API или отдельный script, который создаёт job
+
+Самый обычный сценарий для FastAPI выглядит так:
+
+1. В `app/main.py` лежат `broker`, `scheduler_app`, `app = FastAPI(...)` и task-функции.
+2. В первом терминале запускается FastAPI:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+3. Во втором терминале запускается worker:
+
+```bash
+python -m taskiq worker app.main:broker
+```
+
+4. После этого ты создаёшь job через API, script или Python shell.
+
+Что происходит после запуска:
+
+- scheduler следит за расписанием и в нужный момент вызывает `task.kiq(...)`
+- broker публикует задачу
+- worker забирает задачу и выполняет её
+
+Если worker не запущен, scheduler сможет публиковать задачи в broker, но выполнять их будет некому.
+
+Если хочется запускать scheduler не внутри FastAPI, а отдельно, это тоже можно делать.
+Тогда один process держит `scheduler_app.start()`, а второй process всё равно остаётся Taskiq worker.
+
+## Запуск с FastAPI
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from taskiq import InMemoryBroker
+
+from taskiq_beat import SchedulerApp, SchedulerConfig
+
+engine = create_async_engine("sqlite+aiosqlite:///scheduler.sqlite3")
+session_factory = async_sessionmaker(engine, expire_on_commit=False)
+broker = InMemoryBroker()
+scheduler_app = SchedulerApp(
+    broker=broker,
+    session_factory=session_factory,
+    config=SchedulerConfig(),  # Как настраивается было показано выше
+)
 
 
 @asynccontextmanager
@@ -132,6 +179,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 ```
+
+### Scheduler можно запускать:
+
+- #### Внутри FastAPI
+  Как в примере выше
+
+- #### Отдельно
+    - terminal/container 1:
+      `uvicorn app.main:app --reload`
+    - terminal/container 2:
+      `python -m app.run_scheduler`
+    - terminal/container 3:
+      `python -m taskiq worker app.broker:broker`
+
+Можно и так, и так. Главное правило: не запускать несколько scheduler processes на одну и ту же базу.
 
 ## Создание job
 
