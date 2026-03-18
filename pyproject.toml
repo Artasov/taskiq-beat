@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taskiq-beat"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A database-backed scheduler and beat engine for Taskiq."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,6 +13,7 @@ license-files = ["LICENSE"]
 authors = [
     { name = "xlartas" },
 ]
+urls = { Homepage = "https://github.com/Artasov/taskiq-beat", Repository = "https://github.com/Artasov/taskiq-beat", Issues = "https://github.com/Artasov/taskiq-beat/issues" }
 keywords = [
     "taskiq",
     "beat",
@@ -31,6 +32,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
+    "Typing :: Typed",
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Distributed Computing",
 ]
@@ -56,8 +58,12 @@ dev = [
 [tool.setuptools]
 include-package-data = true
 
+[tool.setuptools.dynamic]
+version = { attr = "taskiq_beat._version.__version__" }
+
 [tool.setuptools.packages.find]
-exclude = ["tests", "tests.*"]
+namespaces = false
+exclude = ["scripts", "scripts.*", "tests", "tests.*"]
 
 [tool.setuptools.package-data]
 taskiq_beat = ["py.typed"]
