@@ -19,6 +19,7 @@
 - [How to run it](#how-to-run-it)
 - [Run with FastAPI](#run-with-fastapi)
 - [Create jobs](#create-jobs)
+- [Upsert and startup sync](#upsert-and-startup-sync)
 - [Manage jobs](#manage-jobs)
 - [Alembic](#alembic)
 - [Default configuration](#default-configuration)
@@ -224,6 +225,18 @@ This is a SQLAlchemy model instance with fields such as:
 
 Most of the time you use `job.id` later for pause, resume, run-now, and delete.
 
+If you want a stable identifier for a system job, pass `job_id` explicitly:
+
+```python
+async with session_factory() as session:
+    job = await scheduler_app.create_scheduler(
+        job_id="system.heartbeat",
+        task=heartbeat_task,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+        name="System heartbeat",
+    ).upsert(session)
+```
+
 ### One-off job
 
 ```python
@@ -255,6 +268,55 @@ async with session_factory() as session:
     )
     job = await scheduler.schedule(session)
 ```
+
+## Upsert and startup sync
+
+For system schedules you usually do not want duplicate rows after every restart.
+
+Use a stable `job_id` and call `upsert(...)`:
+
+```python
+async with session_factory() as session:
+    await scheduler_app.create_scheduler(
+        job_id="system.cleanup",
+        task=heartbeat_task,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        name="Cleanup",
+    ).upsert(session)
+```
+
+`upsert(...)` behavior:
+
+- creates a new row if the job does not exist yet
+- updates the existing row if `job_id` already exists
+- does not create duplicates on restart
+- preserves `next_run_at` if the schedule did not change
+- recalculates `next_run_at` if trigger or enabled state changed
+
+You can also sync several schedules at startup:
+
+```python
+async with session_factory() as session:
+    await scheduler_app.sync_schedules(
+        session,
+        [
+            scheduler_app.create_scheduler(
+                job_id="system.cleanup",
+                task=heartbeat_task,
+                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+                name="Cleanup",
+            ),
+            scheduler_app.create_scheduler(
+                job_id="system.metrics",
+                task=heartbeat_task,
+                trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+                name="Metrics",
+            ),
+        ],
+    )
+```
+
+This is the recommended way to register built-in application schedules during startup.
 
 ## Manage jobs
 

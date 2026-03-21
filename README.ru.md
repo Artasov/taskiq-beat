@@ -19,6 +19,7 @@
 - [Как это запускать](#как-это-запускать)
 - [Запуск с FastAPI](#запуск-с-fastapi)
 - [Создание job](#создание-job)
+- [Upsert и стартовый sync](#upsert-и-стартовый-sync)
 - [Управление job](#управление-job)
 - [Alembic](#alembic)
 - [Конфигурация по умолчанию](#конфигурация-по-умолчанию)
@@ -225,6 +226,18 @@ print(job.id)  # Например: "6c6342d8-6d74-4d16-8f7a-5d4f1b3a0b13"
 
 Чаще всего дальше используется именно `job.id` для pause, resume, run-now и delete.
 
+Если нужен стабильный идентификатор для системной job, передай `job_id` явно:
+
+```python
+async with session_factory() as session:
+    job = await scheduler_app.create_scheduler(
+        job_id="system.heartbeat",
+        task=heartbeat_task,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+        name="System heartbeat",
+    ).upsert(session)
+```
+
 ### One-off job
 
 ```python
@@ -256,6 +269,55 @@ async with session_factory() as session:
     )
     job = await scheduler.schedule(session)
 ```
+
+## Upsert и стартовый sync
+
+Для системных расписаний обычно не нужны дубли строк после каждого рестарта.
+
+Используй стабильный `job_id` и вызывай `upsert(...)`:
+
+```python
+async with session_factory() as session:
+    await scheduler_app.create_scheduler(
+        job_id="system.cleanup",
+        task=heartbeat_task,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        name="Cleanup",
+    ).upsert(session)
+```
+
+Что делает `upsert(...)`:
+
+- создаёт новую строку, если job ещё нет
+- обновляет существующую строку, если `job_id` уже есть
+- не создаёт дубли при рестартах
+- сохраняет `next_run_at`, если расписание не менялось
+- пересчитывает `next_run_at`, если изменился trigger или enabled state
+
+Также можно синкать несколько расписаний на старте:
+
+```python
+async with session_factory() as session:
+    await scheduler_app.sync_schedules(
+        session,
+        [
+            scheduler_app.create_scheduler(
+                job_id="system.cleanup",
+                task=heartbeat_task,
+                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+                name="Cleanup",
+            ),
+            scheduler_app.create_scheduler(
+                job_id="system.metrics",
+                task=heartbeat_task,
+                trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+                name="Metrics",
+            ),
+        ],
+    )
+```
+
+Именно так лучше регистрировать встроенные расписания приложения при старте.
 
 ## Управление job
 

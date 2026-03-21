@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,6 +37,16 @@ class SchedulerApp:
 
     def create_scheduler(self, *args, **kwargs) -> Scheduler:
         return Scheduler(*args, **kwargs, registry=self.registry, engine=self.engine)
+
+    async def upsert_schedule(self, session: AsyncSession, *args, **kwargs) -> SchedulerJob:
+        scheduler = self.create_scheduler(*args, **kwargs)
+        return await scheduler.upsert(session)
+
+    async def sync_schedules(self, session: AsyncSession, schedulers: Sequence[Scheduler]) -> list[SchedulerJob]:
+        jobs: list[SchedulerJob] = []
+        for scheduler in schedulers:
+            jobs.append(await scheduler.upsert(session))
+        return jobs
 
     async def start(self) -> None:
         self.registry.load()
