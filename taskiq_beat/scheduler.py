@@ -16,6 +16,7 @@ from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
 class Scheduler:
     task: Any
     trigger: PeriodicSchedule | OneOffSchedule
+    job_id: str | None = None
     name: str | None = None
     description: str | None = None
     args: list[Any] = field(default_factory=list)
@@ -26,11 +27,32 @@ class Scheduler:
     engine: Any = None
 
     async def schedule(self, session: AsyncSession) -> SchedulerJob:
+        job = self.build_new_job()
+        await JobRepository.create(session, job)
+        await session.commit()
+        self.notify_engine(job)
+        return job
+
+    async def upsert(self, session: AsyncSession) -> SchedulerJob:
+        if self.job_id is None:
+            return await self.schedule(session)
+        existing_job = await JobRepository.get_by_id(session, self.job_id)
+        job = self.build_existing_or_new_job(existing_job=existing_job)
+        if existing_job is None:
+            await JobRepository.create(session, job)
+        await session.commit()
+        self.notify_engine(job)
+        return job
+
+    def build_new_job(self) -> SchedulerJob:
         task_name = self.get_registry().validate_task(self.task)
         TaskRegistry.validate_payload(self.args, self.kwargs, self.metadata)
         created_at = datetime.now(UTC)
         next_run_at = self.get_next_run_at(created_at)
-        job = SchedulerJob(
+        job_kwargs: dict[str, Any] = {}
+        if self.job_id is not None:
+            job_kwargs["id"] = self.job_id
+        return SchedulerJob(
             name=self.name,
             description=self.description,
             task_name=task_name,
@@ -44,11 +66,53 @@ class Scheduler:
             next_run_at=next_run_at if self.is_enabled else None,
             created_at=created_at,
             updated_at=created_at,
+            **job_kwargs,
         )
-        await JobRepository.create(session, job)
-        await session.commit()
-        self.notify_engine(job)
-        return job
+
+    def build_existing_or_new_job(self, *, existing_job: SchedulerJob | None) -> SchedulerJob:
+        if existing_job is None:
+            return self.build_new_job()
+
+        task_name = self.get_registry().validate_task(self.task)
+        TaskRegistry.validate_payload(self.args, self.kwargs, self.metadata)
+        current_time = datetime.now(UTC)
+        kind = self.get_kind()
+        strategy = self.get_strategy()
+        trigger_payload = self.trigger.to_payload()
+        args = list(self.args)
+        kwargs = dict(self.kwargs)
+        metadata = dict(self.metadata)
+
+        schedule_changed = (
+            existing_job.task_name != task_name
+            or existing_job.kind != kind
+            or existing_job.strategy != strategy
+            or dict(existing_job.trigger_payload or {}) != trigger_payload
+            or list(existing_job.task_args or []) != args
+            or dict(existing_job.task_kwargs or {}) != kwargs
+        )
+
+        existing_job.name = self.name
+        existing_job.description = self.description
+        existing_job.task_name = task_name
+        existing_job.kind = kind
+        existing_job.strategy = strategy
+        existing_job.trigger_payload = trigger_payload
+        existing_job.task_args = args
+        existing_job.task_kwargs = kwargs
+        existing_job.metadata_payload = metadata
+        existing_job.updated_at = current_time
+
+        if not self.is_enabled:
+            existing_job.is_enabled = False
+            existing_job.next_run_at = None
+            return existing_job
+
+        should_recalculate = schedule_changed or not existing_job.is_enabled or existing_job.next_run_at is None
+        existing_job.is_enabled = True
+        if should_recalculate:
+            existing_job.next_run_at = self.get_next_run_at(current_time, anchor=existing_job.created_at)
+        return existing_job
 
     def get_registry(self) -> TaskRegistry:
         if self.registry is None:
