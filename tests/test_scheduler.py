@@ -201,8 +201,8 @@ async def test_scheduler_app_start_and_stop(scheduler_app: SchedulerApp) -> None
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_app_logs_job_lifecycle(db_session, scheduler_app: SchedulerApp, caplog) -> None:
-    caplog.set_level(logging.INFO, logger="taskiq_beat.app")
+async def test_scheduler_app_logs_job_lifecycle(db_session, scheduler_app: SchedulerApp, log_capture) -> None:
+    log_capture.set_level(logging.INFO, logger="taskiq_beat.app")
     task = scheduler_app.registry.get_task("tests.echo")
     job = await scheduler_app.create_scheduler(
         task=task,
@@ -214,7 +214,7 @@ async def test_scheduler_app_logs_job_lifecycle(db_session, scheduler_app: Sched
     await scheduler_app.run_now(db_session, job.id)
     await scheduler_app.delete(db_session, job.id)
 
-    messages = [record.getMessage() for record in caplog.records if record.name == "taskiq_beat.app"]
+    messages = [record.getMessage() for record in log_capture.records if record.name == "taskiq_beat.app"]
 
     assert "Scheduler job paused." in messages
     assert "Scheduler job resumed." in messages

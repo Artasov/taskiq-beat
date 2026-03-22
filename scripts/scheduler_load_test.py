@@ -11,11 +11,12 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from taskiq import InMemoryBroker
 
 from taskiq_beat import OneOffSchedule, SchedulerApp, SchedulerBase, SchedulerConfig
+from taskiq_beat.db_utils import clear_scheduler_tables
 from taskiq_beat.models import SchedulerJob, SchedulerRun
 
 
@@ -121,14 +122,7 @@ def render_bar(label: str, value: float, maximum: float, width: int = 32) -> str
 
 
 async def clear_database(factory: async_sessionmaker[AsyncSession]) -> None:
-    async with factory() as session:
-        if session.bind is not None and session.bind.dialect.name == "sqlite":
-            await session.execute(text("PRAGMA foreign_keys=OFF"))
-        for table in reversed(list(SchedulerBase.metadata.tables.values())):
-            await session.execute(delete(table))
-        if session.bind is not None and session.bind.dialect.name == "sqlite":
-            await session.execute(text("PRAGMA foreign_keys=ON"))
-        await session.commit()
+    await clear_scheduler_tables(factory)
 
 
 async def seed_due_jobs(

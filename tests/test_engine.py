@@ -24,12 +24,23 @@ async def scheduler_app(session_factory, broker) -> SchedulerApp:
     )
 
 
+async def load_job_and_runs(
+    session_factory,
+    scheduler_app: SchedulerApp,
+    job_id: str,
+) -> tuple[SchedulerJob, list[SchedulerRun]]:
+    async with session_factory() as session:
+        stored_job = await scheduler_app.get_job(session, job_id)
+        runs = list((await session.execute(select(SchedulerRun).where(SchedulerRun.job_id == job_id))).scalars())
+    return stored_job, runs
+
+
 @pytest.mark.asyncio()
 async def test_engine_dispatches_one_off_job(monkeypatch, session_factory, scheduler_app: SchedulerApp) -> None:
     dispatched: list[str] = []
     task = scheduler_app.registry.get_task("tests.ping")
 
-    async def fake_kiq(*args, **kwargs):
+    async def fake_kiq(*_args, **_kwargs):
         dispatched.append("called")
 
         class Result:
@@ -63,7 +74,7 @@ async def test_engine_dispatches_one_off_job(monkeypatch, session_factory, sched
 async def test_engine_retries_after_dispatch_error(monkeypatch, session_factory, scheduler_app: SchedulerApp) -> None:
     task = scheduler_app.registry.get_task("tests.ping")
 
-    async def fake_kiq(*args, **kwargs):
+    async def fake_kiq(*_args, **_kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(task, "kiq", fake_kiq)
@@ -131,7 +142,7 @@ async def test_engine_dispatches_periodic_job_multiple_times(
     dispatched: list[str] = []
     task = scheduler_app.registry.get_task("tests.ping")
 
-    async def fake_kiq(*args, **kwargs):
+    async def fake_kiq(*_args, **_kwargs):
         dispatched.append("called")
 
         class Result:
@@ -167,12 +178,12 @@ async def test_engine_dispatches_periodic_job_multiple_times(
 
 @pytest.mark.asyncio()
 async def test_engine_logs_dispatch_lifecycle(
-    monkeypatch, session_factory, scheduler_app: SchedulerApp, caplog
+    monkeypatch, session_factory, scheduler_app: SchedulerApp, log_capture
 ) -> None:
-    caplog.set_level(logging.INFO, logger="taskiq_beat.engine")
+    log_capture.set_level(logging.INFO, logger="taskiq_beat.engine")
     task = scheduler_app.registry.get_task("tests.ping")
 
-    async def fake_kiq(*args, **kwargs):
+    async def fake_kiq(*_args, **_kwargs):
         class Result:
             task_id = "task-1"
 
@@ -188,7 +199,7 @@ async def test_engine_logs_dispatch_lifecycle(
 
     await scheduler_app.engine.run_once()
 
-    messages = [record.getMessage() for record in caplog.records if record.name == "taskiq_beat.engine"]
+    messages = [record.getMessage() for record in log_capture.records if record.name == "taskiq_beat.engine"]
 
     assert "Dispatching scheduler jobs batch." in messages
     assert "Scheduler job dispatched." in messages
@@ -204,7 +215,7 @@ async def test_engine_claims_job_once_across_multiple_schedulers(monkeypatch, se
 
     task = broker.find_task("tests.claim_once")
 
-    async def fake_kiq(*args, **kwargs):
+    async def fake_kiq(*_args, **_kwargs):
         dispatched.append("called")
 
         class Result:
@@ -239,9 +250,7 @@ async def test_engine_claims_job_once_across_multiple_schedulers(monkeypatch, se
         scheduler_b.engine.run_once(),
     )
 
-    async with session_factory() as session:
-        stored_job = await scheduler_a.get_job(session, job.id)
-        runs = list((await session.execute(select(SchedulerRun).where(SchedulerRun.job_id == job.id))).scalars())
+    stored_job, runs = await load_job_and_runs(session_factory, scheduler_a, job.id)
 
     assert dispatched == ["called"]
     assert stored_job.is_enabled is False
@@ -258,7 +267,7 @@ async def test_engine_keeps_claim_alive_during_slow_dispatch(monkeypatch, sessio
 
     task = broker.find_task("tests.slow_claim")
 
-    async def fake_kiq(*args, **kwargs):
+    async def fake_kiq(*_args, **_kwargs):
         dispatched.append("called")
 
         class Result:
@@ -294,9 +303,7 @@ async def test_engine_keeps_claim_alive_during_slow_dispatch(monkeypatch, sessio
     await scheduler_b.engine.run_once()
     await scheduler_a_task
 
-    async with session_factory() as session:
-        stored_job = await scheduler_a.get_job(session, job.id)
-        runs = list((await session.execute(select(SchedulerRun).where(SchedulerRun.job_id == job.id))).scalars())
+    stored_job, runs = await load_job_and_runs(session_factory, scheduler_a, job.id)
 
     assert dispatched == ["called"]
     assert stored_job.is_enabled is False

@@ -16,7 +16,8 @@ class TaskRegistry:
             return ()
         return tuple(self.task_loader())
 
-    def get_task_name(self, task: TaskReference) -> str:
+    @staticmethod
+    def get_task_name(task: TaskReference) -> str:
         if isinstance(task, str):
             return task.strip()
         task_name = str(getattr(task, "task_name", "") or "").strip()
@@ -41,10 +42,10 @@ class TaskRegistry:
 
     @classmethod
     def validate_payload(
-        cls,
-        args: Sequence[object] | None,
-        kwargs: dict[str, object] | None,
-        metadata: dict[str, object] | None,
+            cls,
+            args: Sequence[object] | None,
+            kwargs: dict[str, object] | None,
+            metadata: dict[str, object] | None,
     ) -> None:
         json.dumps(list(args or []))
         json.dumps(dict(kwargs or {}))

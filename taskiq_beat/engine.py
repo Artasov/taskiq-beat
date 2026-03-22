@@ -20,11 +20,20 @@ from taskiq_beat.types import TaskiqTask
 log = logging.getLogger(__name__)
 
 
-@dataclass(slots=True, frozen=True, order=True)
+@dataclass(slots=True, frozen=True)
 class SchedulerHeapItem:
     wake_at: datetime
     updated_at: datetime
     job_id: str
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, SchedulerHeapItem):
+            return NotImplemented
+        if self.wake_at != other.wake_at:
+            return self.wake_at < other.wake_at
+        if self.updated_at != other.updated_at:
+            return self.updated_at < other.updated_at
+        return self.job_id < other.job_id
 
 
 @dataclass(slots=True, frozen=True)
@@ -98,11 +107,11 @@ class SchedulerHealthSnapshot:
 
 class SchedulerEngine:
     def __init__(
-        self,
-        *,
-        session_factory: async_sessionmaker[AsyncSession],
-        registry: TaskRegistry,
-        config: SchedulerConfig | None = None,
+            self,
+            *,
+            session_factory: async_sessionmaker[AsyncSession],
+            registry: TaskRegistry,
+            config: SchedulerConfig | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.registry = registry
@@ -193,8 +202,7 @@ class SchedulerEngine:
             self.jobs[state.job_id] = state
             wake_at = state.get_wake_at(self.scheduler_id)
             if wake_at is not None:
-                heapq.heappush(
-                    self.heap,
+                self.push_heap_item(
                     SchedulerHeapItem(
                         wake_at=wake_at,
                         updated_at=state.updated_at,
@@ -207,8 +215,7 @@ class SchedulerEngine:
         self.jobs[state.job_id] = state
         wake_at = state.get_wake_at(self.scheduler_id)
         if wake_at is not None:
-            heapq.heappush(
-                self.heap,
+            self.push_heap_item(
                 SchedulerHeapItem(
                     wake_at=wake_at,
                     updated_at=state.updated_at,
@@ -230,6 +237,9 @@ class SchedulerEngine:
         self.jobs.pop(job_id, None)
         self.wakeup_event.set()
         log.debug("Scheduler engine removed in-memory job state.", extra={"job_id": job_id})
+
+    def push_heap_item(self, item: SchedulerHeapItem) -> None:
+        heapq.heappush(self.heap, item)
 
     async def dispatch_due_jobs(self) -> None:
         while True:
@@ -311,7 +321,7 @@ class SchedulerEngine:
                         kwargs=dict(claimed_job.task_kwargs or {}),
                         scheduled_for=claimed_job.next_run_at or current_time,
                         claim_started_at=current_time,
-                    )
+                    ),
                 )
             await claim_session.commit()
 
@@ -429,21 +439,22 @@ class SchedulerEngine:
             await asyncio.gather(keepalive_task, return_exceptions=True)
 
     def apply_dispatch_outcome(
-        self,
-        *,
-        job: SchedulerJob,
-        prepared: PreparedDispatch,
-        outcome: DispatchOutcome,
-        current_time: datetime,
-        runs_to_create: list[SchedulerRun],
+            self,
+            *,
+            job: SchedulerJob,
+            prepared: PreparedDispatch,
+            outcome: DispatchOutcome,
+            current_time: datetime,
+            runs_to_create: list[SchedulerRun],
     ) -> None:
         job.claimed_by = None
         job.claimed_at = None
         job.claim_expires_at = None
         if outcome.status == "failed":
             retry_from = outcome.finished_at or outcome.dispatched_at or current_time
+            retry_at = retry_from + timedelta(seconds=self.config.dispatch_retry_seconds)
             job.last_error = outcome.error
-            job.next_run_at = retry_from + timedelta(seconds=self.config.dispatch_retry_seconds)
+            job.next_run_at = retry_at
             job.updated_at = retry_from
             self.failed_dispatch_count += 1
             log.warning(
@@ -451,7 +462,7 @@ class SchedulerEngine:
                 extra={
                     "job_id": str(job.id),
                     "task_name": job.task_name,
-                    "retry_at": job.next_run_at.isoformat() if job.next_run_at else None,
+                    "retry_at": retry_at.isoformat(),
                 },
             )
             if self.config.record_runs:
@@ -465,7 +476,7 @@ class SchedulerEngine:
                         error=outcome.error,
                         created_at=retry_from,
                         updated_at=retry_from,
-                    )
+                    ),
                 )
             return
 
@@ -487,13 +498,15 @@ class SchedulerEngine:
             job.next_run_at = next_run_at
             if next_run_at is None:
                 job.is_enabled = False
+        logged_next_run_at = SchedulerJobState.from_job(job).next_run_at
+        logged_next_run_at_iso = logged_next_run_at.isoformat() if logged_next_run_at is not None else None
         log.debug(
             "Scheduler job state updated after dispatch.",
             extra={
                 "job_id": str(job.id),
                 "task_name": job.task_name,
                 "is_enabled": job.is_enabled,
-                "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+                "next_run_at": logged_next_run_at_iso,
             },
         )
 
@@ -508,7 +521,7 @@ class SchedulerEngine:
                     broker_task_id=outcome.broker_task_id,
                     created_at=finished_at,
                     updated_at=finished_at,
-                )
+                ),
             )
 
     async def cleanup_runs(self) -> None:

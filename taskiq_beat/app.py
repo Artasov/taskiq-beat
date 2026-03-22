@@ -20,12 +20,12 @@ log = logging.getLogger(__name__)
 
 class SchedulerApp:
     def __init__(
-        self,
-        *,
-        broker: TaskiqBroker,
-        session_factory: async_sessionmaker[AsyncSession],
-        config: SchedulerConfig | None = None,
-        task_loader: TaskLoader | None = None,
+            self,
+            *,
+            broker: TaskiqBroker,
+            session_factory: async_sessionmaker[AsyncSession],
+            config: SchedulerConfig | None = None,
+            task_loader: TaskLoader | None = None,
     ) -> None:
         self.broker = broker
         self.session_factory = session_factory
@@ -38,17 +38,17 @@ class SchedulerApp:
         )
 
     def create_scheduler(
-        self,
-        *,
-        task: TaskReference,
-        trigger: PeriodicSchedule | OneOffSchedule,
-        job_id: str | None = None,
-        name: str | None = None,
-        description: str | None = None,
-        args: list[object] | None = None,
-        kwargs: dict[str, object] | None = None,
-        metadata: dict[str, object] | None = None,
-        is_enabled: bool = True,
+            self,
+            *,
+            task: TaskReference,
+            trigger: PeriodicSchedule | OneOffSchedule,
+            job_id: str | None = None,
+            name: str | None = None,
+            description: str | None = None,
+            args: list[object] | None = None,
+            kwargs: dict[str, object] | None = None,
+            metadata: dict[str, object] | None = None,
+            is_enabled: bool = True,
     ) -> Scheduler:
         return Scheduler(
             task=task,
@@ -65,18 +65,18 @@ class SchedulerApp:
         )
 
     async def upsert_schedule(
-        self,
-        session: AsyncSession,
-        *,
-        task: TaskReference,
-        trigger: PeriodicSchedule | OneOffSchedule,
-        job_id: str | None = None,
-        name: str | None = None,
-        description: str | None = None,
-        args: list[object] | None = None,
-        kwargs: dict[str, object] | None = None,
-        metadata: dict[str, object] | None = None,
-        is_enabled: bool = True,
+            self,
+            session: AsyncSession,
+            *,
+            task: TaskReference,
+            trigger: PeriodicSchedule | OneOffSchedule,
+            job_id: str | None = None,
+            name: str | None = None,
+            description: str | None = None,
+            args: list[object] | None = None,
+            kwargs: dict[str, object] | None = None,
+            metadata: dict[str, object] | None = None,
+            is_enabled: bool = True,
     ) -> SchedulerJob:
         scheduler = self.create_scheduler(
             task=task,
@@ -91,7 +91,8 @@ class SchedulerApp:
         )
         return await scheduler.upsert(session)
 
-    async def sync_schedules(self, session: AsyncSession, schedulers: Sequence[Scheduler]) -> list[SchedulerJob]:
+    @staticmethod
+    async def sync_schedules(session: AsyncSession, schedulers: Sequence[Scheduler]) -> list[SchedulerJob]:
         log.info("Syncing scheduler definitions.", extra={"scheduler_count": len(schedulers)})
         jobs: list[SchedulerJob] = []
         for scheduler in schedulers:
@@ -110,7 +111,8 @@ class SchedulerApp:
         await self.engine.stop()
         log.info("Scheduler app stopped.")
 
-    async def get_job(self, session: AsyncSession, job_id: str) -> SchedulerJob:
+    @staticmethod
+    async def get_job(session: AsyncSession, job_id: str) -> SchedulerJob:
         job = await JobRepository.get_by_id(session, job_id)
         if job is None:
             raise ValueError(f"Scheduler job '{job_id}' was not found.")
@@ -169,7 +171,8 @@ class SchedulerApp:
         log.info("Scheduler job marked to run now.", extra={"job_id": str(job.id), "task_name": job.task_name})
         return job
 
-    async def purge_runs(self, session: AsyncSession, *, finished_before: datetime) -> int:
+    @staticmethod
+    async def purge_runs(session: AsyncSession, *, finished_before: datetime) -> int:
         deleted_runs = await RunRepository.purge_finished_before(session, finished_before)
         await session.commit()
         log.info(

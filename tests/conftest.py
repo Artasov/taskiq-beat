@@ -6,10 +6,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from _pytest.logging import LogCaptureFixture
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from taskiq import InMemoryBroker
 
+from taskiq_beat.db_utils import clear_scheduler_tables
 from taskiq_beat.models import SchedulerBase
 
 
@@ -18,8 +19,13 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     test_db_path = Path(tempfile.gettempdir()) / f"taskiq_beat_{uuid4().hex}.sqlite3"
     database_url = f"sqlite+aiosqlite:///{test_db_path.as_posix()}"
     engine = create_async_engine(database_url, future=True)
-    async with engine.begin() as connection:
+    connection = await engine.connect()
+    transaction = await connection.begin()
+    try:
         await connection.run_sync(SchedulerBase.metadata.create_all)
+        await transaction.commit()
+    finally:
+        await connection.close()
     factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
     try:
         yield factory
@@ -29,14 +35,7 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 async def clear_database(factory: async_sessionmaker[AsyncSession]) -> None:
-    async with factory() as session:
-        if session.bind is not None and session.bind.dialect.name == "sqlite":
-            await session.execute(text("PRAGMA foreign_keys=OFF"))
-        for table in reversed(list(SchedulerBase.metadata.tables.values())):
-            await session.execute(delete(table))
-        if session.bind is not None and session.bind.dialect.name == "sqlite":
-            await session.execute(text("PRAGMA foreign_keys=ON"))
-        await session.commit()
+    await clear_scheduler_tables(factory)
 
 
 @pytest.fixture(autouse=True)
@@ -58,3 +57,8 @@ async def db_session(
 @pytest.fixture()
 def broker() -> InMemoryBroker:
     return InMemoryBroker()
+
+
+@pytest.fixture()
+def log_capture(caplog: LogCaptureFixture) -> LogCaptureFixture:
+    return caplog
