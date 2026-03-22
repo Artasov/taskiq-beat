@@ -81,3 +81,26 @@ def test_one_off_requires_timezone() -> None:
 def test_crontab_invalid_step_raises() -> None:
     with pytest.raises(ValueError, match="positive"):
         CrontabTrigger(second="*/0")
+
+
+def test_crontab_uses_standard_day_of_month_or_day_of_week_semantics() -> None:
+    crontab = CrontabTrigger(
+        second="0",
+        minute="0",
+        hour="9",
+        day_of_month="20",
+        day_of_week="1",
+        timezone="UTC",
+    )
+
+    result = crontab.get_next_run_at(datetime(2026, 3, 18, 10, 0, 0, tzinfo=UTC))
+
+    assert result == datetime(2026, 3, 20, 9, 0, 0, tzinfo=UTC)
+
+
+def test_crontab_supports_range_step_syntax() -> None:
+    crontab = CrontabTrigger(second="0", minute="10-20/5", hour="*", timezone="UTC")
+
+    result = crontab.get_next_run_at(datetime(2026, 3, 18, 10, 11, 0, tzinfo=UTC))
+
+    assert result == datetime(2026, 3, 18, 10, 15, 0, tzinfo=UTC)

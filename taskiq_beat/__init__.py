@@ -1,6 +1,7 @@
 from taskiq_beat._version import __version__
 from taskiq_beat.app import SchedulerApp
 from taskiq_beat.config import DEFAULT_TIMEZONE, SchedulerConfig
+from taskiq_beat.engine import SchedulerHealthSnapshot
 from taskiq_beat.models import SchedulerBase, SchedulerJob, SchedulerRun
 from taskiq_beat.scheduler import Scheduler
 from taskiq_beat.triggers import CrontabTrigger, IntervalTrigger, OneOffSchedule, PeriodicSchedule
@@ -15,6 +16,7 @@ __all__ = (
     "SchedulerApp",
     "SchedulerBase",
     "SchedulerConfig",
+    "SchedulerHealthSnapshot",
     "SchedulerJob",
     "SchedulerRun",
     "__version__",

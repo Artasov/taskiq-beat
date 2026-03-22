@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from taskiq_beat import IntervalTrigger, PeriodicSchedule, SchedulerApp, SchedulerConfig
-from taskiq_beat.models import SchedulerJob
+from taskiq_beat.models import SchedulerJob, SchedulerRun
 
 
 @pytest.fixture()
@@ -96,7 +96,9 @@ async def test_scheduler_pause_resume_run_now_and_delete(db_session, scheduler_a
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_upsert_creates_and_updates_job_without_duplicates(db_session, scheduler_app: SchedulerApp) -> None:
+async def test_scheduler_upsert_creates_and_updates_job_without_duplicates(
+    db_session, scheduler_app: SchedulerApp
+) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
     scheduler = scheduler_app.create_scheduler(
         job_id="system.echo",
@@ -218,3 +220,79 @@ async def test_scheduler_app_logs_job_lifecycle(db_session, scheduler_app: Sched
     assert "Scheduler job resumed." in messages
     assert "Scheduler job marked to run now." in messages
     assert "Scheduler job deleted." in messages
+
+
+@pytest.mark.asyncio()
+async def test_scheduler_app_purges_run_history(db_session, scheduler_app: SchedulerApp) -> None:
+    old_run = SchedulerJob(
+        id="job-with-runs",
+        task_name="tests.echo",
+        kind="one_off",
+        strategy="one_off",
+        trigger_payload={"run_at": datetime.now(UTC).isoformat()},
+        task_args=[],
+        task_kwargs={},
+        metadata_payload={},
+        is_enabled=False,
+        next_run_at=None,
+        created_at=datetime.now(UTC) - timedelta(days=10),
+        updated_at=datetime.now(UTC) - timedelta(days=10),
+    )
+    db_session.add(old_run)
+    await db_session.flush()
+    db_session.add(
+        SchedulerRun(
+            job_id=old_run.id,
+            status="dispatched",
+            scheduled_for=datetime.now(UTC) - timedelta(days=10),
+            dispatched_at=datetime.now(UTC) - timedelta(days=10),
+            finished_at=datetime.now(UTC) - timedelta(days=10),
+            broker_task_id="task-1",
+            created_at=datetime.now(UTC) - timedelta(days=10),
+            updated_at=datetime.now(UTC) - timedelta(days=10),
+        )
+    )
+    await db_session.commit()
+
+    deleted_runs = await scheduler_app.purge_runs(
+        db_session,
+        finished_before=datetime.now(UTC) - timedelta(days=1),
+    )
+
+    remaining_runs = list((await db_session.execute(select(SchedulerRun))).scalars())
+
+    assert deleted_runs == 1
+    assert remaining_runs == []
+
+
+@pytest.mark.asyncio()
+async def test_scheduler_app_exposes_health_snapshot(scheduler_app: SchedulerApp) -> None:
+    snapshot = scheduler_app.get_health_snapshot()
+
+    assert snapshot.scheduler_id == scheduler_app.config.scheduler_id
+    assert snapshot.heap_size == 0
+    assert snapshot.sync_count == 0
+
+
+@pytest.mark.asyncio()
+async def test_scheduler_resume_handles_sqlite_like_naive_timestamps(
+    db_session,
+    scheduler_app: SchedulerApp,
+) -> None:
+    task = scheduler_app.registry.get_task("tests.echo")
+    job = await scheduler_app.create_scheduler(
+        task=task,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+    ).schedule(db_session)
+
+    job.created_at = job.created_at.replace(tzinfo=None)
+    job.updated_at = job.updated_at.replace(tzinfo=None)
+    await db_session.commit()
+
+    paused = await scheduler_app.pause(db_session, job.id)
+    assert paused.is_enabled is False
+
+    resumed = await scheduler_app.resume(db_session, job.id)
+
+    assert resumed.is_enabled is True
+    assert resumed.next_run_at is not None

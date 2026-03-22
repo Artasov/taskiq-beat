@@ -1,33 +1,38 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from taskiq_beat.datetime_utils import normalize_utc
 from taskiq_beat.models import SchedulerJob
 from taskiq_beat.registry import TaskRegistry
 from taskiq_beat.repositories import JobRepository
 from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
+from taskiq_beat.types import TaskReference
+
+if TYPE_CHECKING:
+    from taskiq_beat.engine import SchedulerEngine
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class Scheduler:
-    task: Any
+    task: TaskReference
     trigger: PeriodicSchedule | OneOffSchedule
     job_id: str | None = None
     name: str | None = None
     description: str | None = None
-    args: list[Any] = field(default_factory=list)
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    args: list[object] = field(default_factory=list)
+    kwargs: dict[str, object] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
     is_enabled: bool = True
     registry: TaskRegistry | None = None
-    engine: Any = None
+    engine: SchedulerEngine | None = None
 
     async def schedule(self, session: AsyncSession) -> SchedulerJob:
         job = self.build_new_job()
@@ -62,7 +67,7 @@ class Scheduler:
         TaskRegistry.validate_payload(self.args, self.kwargs, self.metadata)
         created_at = datetime.now(UTC)
         next_run_at = self.get_next_run_at(created_at)
-        job_kwargs: dict[str, Any] = {}
+        job_kwargs: dict[str, object] = {}
         if self.job_id is not None:
             job_kwargs["id"] = self.job_id
         return SchedulerJob(
@@ -114,6 +119,9 @@ class Scheduler:
         existing_job.task_args = args
         existing_job.task_kwargs = kwargs
         existing_job.metadata_payload = metadata
+        existing_job.claimed_by = None
+        existing_job.claimed_at = None
+        existing_job.claim_expires_at = None
         existing_job.updated_at = current_time
 
         if not self.is_enabled:
@@ -143,10 +151,12 @@ class Scheduler:
         return "one_off" if isinstance(self.trigger, OneOffSchedule) else self.trigger.strategy
 
     def get_next_run_at(self, current_time: datetime, *, anchor: datetime | None = None) -> datetime | None:
-        normalized_anchor = anchor or current_time
+        normalized_current_time = normalize_utc(current_time)
+        normalized_anchor = normalize_utc(anchor) if anchor is not None else normalized_current_time
         if isinstance(self.trigger, OneOffSchedule):
-            return self.trigger.run_at.astimezone(UTC) if self.trigger.run_at.astimezone(UTC) > current_time else current_time
-        return self.trigger.get_next_run_at(current_time, anchor=normalized_anchor)
+            run_at = normalize_utc(self.trigger.run_at)
+            return run_at if run_at > normalized_current_time else normalized_current_time
+        return self.trigger.get_next_run_at(normalized_current_time, anchor=normalized_anchor)
 
     @classmethod
     def build_trigger(cls, job: SchedulerJob) -> PeriodicSchedule | OneOffSchedule:
