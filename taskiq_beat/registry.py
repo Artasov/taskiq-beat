@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any
 
-from taskiq.decor import AsyncTaskiqDecoratedTask
+from taskiq_beat.types import TaskiqBroker, TaskiqTask, TaskLoader, TaskReference
 
 
 class TaskRegistry:
-    def __init__(self, *, broker: Any, task_loader: Any = None) -> None:
+    def __init__(self, *, broker: TaskiqBroker, task_loader: TaskLoader | None = None) -> None:
         self.broker = broker
         self.task_loader = task_loader
 
@@ -17,7 +16,7 @@ class TaskRegistry:
             return ()
         return tuple(self.task_loader())
 
-    def get_task_name(self, task: AsyncTaskiqDecoratedTask | str) -> str:
+    def get_task_name(self, task: TaskReference) -> str:
         if isinstance(task, str):
             return task.strip()
         task_name = str(getattr(task, "task_name", "") or "").strip()
@@ -25,7 +24,7 @@ class TaskRegistry:
             raise ValueError("Scheduler task must have a task_name.")
         return task_name
 
-    def get_task(self, task_name: str) -> AsyncTaskiqDecoratedTask:
+    def get_task(self, task_name: str) -> TaskiqTask:
         normalized_name = task_name.strip()
         task = self.broker.find_task(normalized_name)
         if task is None:
@@ -35,13 +34,18 @@ class TaskRegistry:
             raise ValueError(f"Task '{normalized_name}' is not registered in Taskiq.")
         return task
 
-    def validate_task(self, task: AsyncTaskiqDecoratedTask | str) -> str:
+    def validate_task(self, task: TaskReference) -> str:
         task_name = self.get_task_name(task)
         self.get_task(task_name)
         return task_name
 
     @classmethod
-    def validate_payload(cls, args: Sequence[Any] | None, kwargs: dict[str, Any] | None, metadata: dict[str, Any] | None) -> None:
+    def validate_payload(
+        cls,
+        args: Sequence[object] | None,
+        kwargs: dict[str, object] | None,
+        metadata: dict[str, object] | None,
+    ) -> None:
         json.dumps(list(args or []))
         json.dumps(dict(kwargs or {}))
         json.dumps(dict(metadata or {}))

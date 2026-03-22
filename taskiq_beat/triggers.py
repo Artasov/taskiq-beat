@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from taskiq_beat.config import DEFAULT_TIMEZONE
+from taskiq_beat.datetime_utils import normalize_timezone, normalize_utc
 
 
 class TimezoneResolver:
@@ -28,11 +29,23 @@ class CronFieldSet:
             if part == "*":
                 result.update(range(minimum, maximum + 1))
                 continue
-            if part.startswith("*/"):
-                step = int(part[2:])
+            if "/" in part:
+                base_text, step_text = part.split("/", 1)
+                step = int(step_text)
                 if step <= 0:
                     raise ValueError("Cron step must be positive.")
-                result.update(range(minimum, maximum + 1, step))
+                if base_text == "*":
+                    range_start = minimum
+                    range_end = maximum
+                elif "-" in base_text:
+                    start_text, end_text = base_text.split("-", 1)
+                    range_start = int(start_text)
+                    range_end = int(end_text)
+                    if range_start > range_end:
+                        raise ValueError("Cron range start must be <= end.")
+                else:
+                    raise ValueError("Cron step base must be '*' or a range.")
+                result.update(range(range_start, range_end + 1, step))
                 continue
             if "-" in part:
                 start_text, end_text = part.split("-", 1)
@@ -48,6 +61,10 @@ class CronFieldSet:
         if min(result) < minimum or max(result) > maximum:
             raise ValueError(f"Cron values must be between {minimum} and {maximum}.")
         return result
+
+    @staticmethod
+    def matches_all(expression: str, minimum: int, maximum: int) -> bool:
+        return CronFieldSet.parse(expression, minimum, maximum) == set(range(minimum, maximum + 1))
 
 
 @dataclass(slots=True, frozen=True)
@@ -83,7 +100,7 @@ class IntervalTrigger:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "IntervalTrigger":
+    def from_payload(cls, payload: dict) -> IntervalTrigger:
         return cls(
             seconds=payload.get("seconds"),
             minutes=payload.get("minutes"),
@@ -92,8 +109,8 @@ class IntervalTrigger:
         )
 
     def get_next_run_at(self, after: datetime, *, anchor: datetime) -> datetime:
-        base = anchor.astimezone(UTC).replace(microsecond=0)
-        current = after.astimezone(UTC).replace(microsecond=0)
+        base = normalize_utc(anchor).replace(microsecond=0)
+        current = normalize_utc(after).replace(microsecond=0)
         if current < base:
             return base
         delta_seconds = int((current - base).total_seconds())
@@ -136,7 +153,7 @@ class CrontabTrigger:
         saturday: str | None = None,
         sunday: str | None = None,
         timezone: str = DEFAULT_TIMEZONE,
-    ) -> "CrontabTrigger":
+    ) -> CrontabTrigger:
         if seconds:
             return cls(second=f"*/{seconds}", timezone=timezone)
         if minutes:
@@ -183,7 +200,7 @@ class CrontabTrigger:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "CrontabTrigger":
+    def from_payload(cls, payload: dict) -> CrontabTrigger:
         return cls(
             second=str(payload.get("second", "0")),
             minute=str(payload.get("minute", "*")),
@@ -196,20 +213,28 @@ class CrontabTrigger:
 
     def get_next_run_at(self, after: datetime) -> datetime:
         timezone = TimezoneResolver.get(self.timezone)
-        current = after.astimezone(timezone).replace(microsecond=0) + timedelta(seconds=1)
+        current = normalize_timezone(after, timezone).replace(microsecond=0) + timedelta(seconds=1)
         seconds = sorted(CronFieldSet.parse(self.second, 0, 59))
         minutes = sorted(CronFieldSet.parse(self.minute, 0, 59))
         hours = sorted(CronFieldSet.parse(self.hour, 0, 23))
         days = CronFieldSet.parse(self.day_of_month, 1, 31)
         months = CronFieldSet.parse(self.month_of_year, 1, 12)
         weekdays = CronFieldSet.parse(self.day_of_week, 0, 6)
+        day_of_month_matches_all = CronFieldSet.matches_all(self.day_of_month, 1, 31)
+        day_of_week_matches_all = CronFieldSet.matches_all(self.day_of_week, 0, 6)
         limit = current + timedelta(days=366 * 5)
 
         while current <= limit:
             if current.month not in months:
                 current = self.move_month(current, months)
                 continue
-            if current.day not in days or current.weekday() not in weekdays:
+            if not self.day_matches(
+                current=current,
+                days=days,
+                weekdays=weekdays,
+                day_of_month_matches_all=day_of_month_matches_all,
+                day_of_week_matches_all=day_of_week_matches_all,
+            ):
                 current = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0)
                 continue
             next_hour = self.next_value(hours, current.hour)
@@ -233,7 +258,7 @@ class CrontabTrigger:
                 else:
                     current = current.replace(second=next_second)
                 continue
-            return current.astimezone(UTC)
+            return normalize_utc(current)
         raise ValueError("Unable to compute next run for crontab.")
 
     @staticmethod
@@ -248,6 +273,25 @@ class CrontabTrigger:
         target_month = min((item for item in allowed_months if item > current.month), default=min(allowed_months))
         year = current.year + 1 if target_month <= current.month else current.year
         return current.replace(year=year, month=target_month, day=1, hour=0, minute=0, second=0)
+
+    @staticmethod
+    def day_matches(
+        *,
+        current: datetime,
+        days: set[int],
+        weekdays: set[int],
+        day_of_month_matches_all: bool,
+        day_of_week_matches_all: bool,
+    ) -> bool:
+        day_matches = current.day in days
+        weekday_matches = current.weekday() in weekdays
+        if day_of_month_matches_all and day_of_week_matches_all:
+            return True
+        if day_of_month_matches_all:
+            return weekday_matches
+        if day_of_week_matches_all:
+            return day_matches
+        return day_matches or weekday_matches
 
 
 @dataclass(slots=True, frozen=True)
@@ -276,12 +320,12 @@ class PeriodicSchedule:
             "strategy": self.strategy,
             "interval": self.interval.to_payload() if self.interval is not None else None,
             "crontab": self.crontab.to_payload() if self.crontab is not None else None,
-            "start_at": self.start_at.astimezone(UTC).isoformat() if self.start_at is not None else None,
-            "end_at": self.end_at.astimezone(UTC).isoformat() if self.end_at is not None else None,
+            "start_at": normalize_utc(self.start_at).isoformat() if self.start_at is not None else None,
+            "end_at": normalize_utc(self.end_at).isoformat() if self.end_at is not None else None,
         }
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "PeriodicSchedule":
+    def from_payload(cls, payload: dict) -> PeriodicSchedule:
         start_at = payload.get("start_at")
         end_at = payload.get("end_at")
         return cls(
@@ -292,16 +336,23 @@ class PeriodicSchedule:
         )
 
     def get_next_run_at(self, after: datetime, *, anchor: datetime) -> datetime | None:
-        current = after.astimezone(UTC)
-        if self.end_at is not None and current >= self.end_at.astimezone(UTC):
+        current = normalize_utc(after)
+        normalized_start_at = normalize_utc(self.start_at) if self.start_at is not None else None
+        normalized_end_at = normalize_utc(self.end_at) if self.end_at is not None else None
+        if normalized_end_at is not None and current >= normalized_end_at:
             return None
         if self.interval is not None:
-            interval_anchor = self.start_at.astimezone(UTC) if self.start_at is not None else anchor.astimezone(UTC)
+            interval_anchor = normalized_start_at if normalized_start_at is not None else normalize_utc(anchor)
             next_run = self.interval.get_next_run_at(current, anchor=interval_anchor)
         else:
-            baseline = self.start_at.astimezone(UTC) - timedelta(seconds=1) if self.start_at and current < self.start_at else current
+            assert self.crontab is not None
+            baseline = (
+                normalized_start_at - timedelta(seconds=1)
+                if normalized_start_at is not None and current < normalized_start_at
+                else current
+            )
             next_run = self.crontab.get_next_run_at(baseline)
-        if self.end_at is not None and next_run > self.end_at.astimezone(UTC):
+        if normalized_end_at is not None and next_run > normalized_end_at:
             return None
         return next_run
 
@@ -315,8 +366,8 @@ class OneOffSchedule:
             raise ValueError("One-off schedule run_at must be timezone-aware.")
 
     def to_payload(self) -> dict[str, str]:
-        return {"run_at": self.run_at.astimezone(UTC).isoformat()}
+        return {"run_at": normalize_utc(self.run_at).isoformat()}
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "OneOffSchedule":
+    def from_payload(cls, payload: dict) -> OneOffSchedule:
         return cls(run_at=datetime.fromisoformat(str(payload["run_at"])))

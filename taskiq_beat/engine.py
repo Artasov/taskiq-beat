@@ -5,20 +5,24 @@ import heapq
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from taskiq_beat.config import SchedulerConfig
+from taskiq_beat.datetime_utils import normalize_utc
 from taskiq_beat.models import SchedulerJob, SchedulerRun
 from taskiq_beat.registry import TaskRegistry
 from taskiq_beat.repositories import JobRepository, RunRepository
 from taskiq_beat.scheduler import Scheduler
+from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
+from taskiq_beat.types import TaskiqTask
 
 log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True, order=True)
 class SchedulerHeapItem:
-    next_run_at: datetime
+    wake_at: datetime
     updated_at: datetime
     job_id: str
 
@@ -29,27 +33,39 @@ class SchedulerJobState:
     is_enabled: bool
     next_run_at: datetime | None
     updated_at: datetime
+    claimed_by: str | None
+    claim_expires_at: datetime | None
 
     @classmethod
-    def from_job(cls, job: SchedulerJob) -> "SchedulerJobState":
-        next_run_at = job.next_run_at.astimezone(UTC) if job.next_run_at is not None else None
+    def from_job(cls, job: SchedulerJob) -> SchedulerJobState:
+        next_run_at = normalize_utc(job.next_run_at) if job.next_run_at is not None else None
         return cls(
             job_id=str(job.id),
             is_enabled=job.is_enabled,
             next_run_at=next_run_at,
-            updated_at=job.updated_at.astimezone(UTC),
+            updated_at=normalize_utc(job.updated_at),
+            claimed_by=job.claimed_by,
+            claim_expires_at=normalize_utc(job.claim_expires_at) if job.claim_expires_at is not None else None,
         )
+
+    def get_wake_at(self, scheduler_id: str) -> datetime | None:
+        if not self.is_enabled or self.next_run_at is None:
+            return None
+        if self.claimed_by and self.claimed_by != scheduler_id and self.claim_expires_at is not None:
+            return max(self.next_run_at, self.claim_expires_at)
+        return self.next_run_at
 
 
 @dataclass(slots=True, frozen=True)
 class PreparedDispatch:
     job_id: str
     task_name: str
-    task: Any
-    trigger: Any
-    args: list[Any]
-    kwargs: dict[str, Any]
+    task: TaskiqTask
+    trigger: PeriodicSchedule | OneOffSchedule
+    args: list[object]
+    kwargs: dict[str, object]
     scheduled_for: datetime
+    claim_started_at: datetime
 
 
 @dataclass(slots=True, frozen=True)
@@ -62,20 +78,48 @@ class DispatchOutcome:
     finished_at: datetime | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class SchedulerHealthSnapshot:
+    scheduler_id: str
+    is_running: bool
+    active_job_count: int
+    heap_size: int
+    sync_count: int
+    claimed_job_count: int
+    dispatched_job_count: int
+    failed_dispatch_count: int
+    claim_conflict_count: int
+    cleaned_run_count: int
+    last_sync_at: datetime | None
+    last_dispatch_started_at: datetime | None
+    last_dispatch_finished_at: datetime | None
+    last_cleanup_at: datetime | None
+
+
 class SchedulerEngine:
     def __init__(
         self,
         *,
-        session_factory,
+        session_factory: async_sessionmaker[AsyncSession],
         registry: TaskRegistry,
         config: SchedulerConfig | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.registry = registry
         self.config = config or SchedulerConfig()
+        self.scheduler_id = self.config.scheduler_id
         self.jobs: dict[str, SchedulerJobState] = {}
         self.heap: list[SchedulerHeapItem] = []
         self.last_sync_at: datetime = datetime.now(UTC)
+        self.last_dispatch_started_at: datetime | None = None
+        self.last_dispatch_finished_at: datetime | None = None
+        self.last_cleanup_at: datetime | None = None
+        self.sync_count = 0
+        self.claimed_job_count = 0
+        self.dispatched_job_count = 0
+        self.failed_dispatch_count = 0
+        self.claim_conflict_count = 0
+        self.cleaned_run_count = 0
         self.stop_event = asyncio.Event()
         self.wakeup_event = asyncio.Event()
         self.runner_task: asyncio.Task[None] | None = None
@@ -108,6 +152,7 @@ class SchedulerEngine:
     async def run_once(self) -> None:
         await self.sync_storage()
         await self.dispatch_due_jobs()
+        await self.cleanup_runs()
 
     async def wait_next_tick(self) -> None:
         timeout = self.get_sleep_timeout()
@@ -122,7 +167,7 @@ class SchedulerEngine:
         if not self.heap:
             return self.config.sync_interval_seconds
         head = self.heap[0]
-        seconds_left = (head.next_run_at - datetime.now(UTC)).total_seconds()
+        seconds_left = (head.wake_at - datetime.now(UTC)).total_seconds()
         return max(min(seconds_left, self.config.sync_interval_seconds), self.config.idle_sleep_seconds)
 
     async def sync_storage(self) -> None:
@@ -139,17 +184,19 @@ class SchedulerEngine:
         self.merge_jobs(active_jobs)
         current_time = datetime.now(UTC)
         self.last_sync_at = current_time
+        self.sync_count += 1
         log.info("Scheduler engine synced jobs from storage.", extra={"active_job_count": len(active_jobs)})
 
     def merge_jobs(self, jobs: list[SchedulerJob]) -> None:
         for job in jobs:
             state = SchedulerJobState.from_job(job)
             self.jobs[state.job_id] = state
-            if state.is_enabled and state.next_run_at is not None:
+            wake_at = state.get_wake_at(self.scheduler_id)
+            if wake_at is not None:
                 heapq.heappush(
                     self.heap,
                     SchedulerHeapItem(
-                        next_run_at=state.next_run_at,
+                        wake_at=wake_at,
                         updated_at=state.updated_at,
                         job_id=state.job_id,
                     ),
@@ -158,11 +205,12 @@ class SchedulerEngine:
     def upsert_job(self, job: SchedulerJob) -> None:
         state = SchedulerJobState.from_job(job)
         self.jobs[state.job_id] = state
-        if state.is_enabled and state.next_run_at is not None:
+        wake_at = state.get_wake_at(self.scheduler_id)
+        if wake_at is not None:
             heapq.heappush(
                 self.heap,
                 SchedulerHeapItem(
-                    next_run_at=state.next_run_at,
+                    wake_at=wake_at,
                     updated_at=state.updated_at,
                     job_id=state.job_id,
                 ),
@@ -170,7 +218,12 @@ class SchedulerEngine:
         self.wakeup_event.set()
         log.debug(
             "Scheduler engine upserted in-memory job state.",
-            extra={"job_id": state.job_id, "next_run_at": state.next_run_at.isoformat() if state.next_run_at else None},
+            extra={
+                "job_id": state.job_id,
+                "next_run_at": state.next_run_at.isoformat() if state.next_run_at else None,
+                "wake_at": wake_at.isoformat() if wake_at else None,
+                "claimed_by": state.claimed_by,
+            },
         )
 
     def remove_job(self, job_id: str) -> None:
@@ -188,63 +241,108 @@ class SchedulerEngine:
 
     def collect_due_jobs(self, current_time: datetime) -> list[SchedulerJobState]:
         due_jobs: list[SchedulerJobState] = []
-        while self.heap and self.heap[0].next_run_at <= current_time and len(due_jobs) < self.config.dispatch_batch_size:
+        while self.heap and self.heap[0].wake_at <= current_time and len(due_jobs) < self.config.dispatch_batch_size:
             item = heapq.heappop(self.heap)
             job = self.jobs.get(item.job_id)
             if job is None:
                 continue
-            if not job.is_enabled or job.next_run_at is None:
+            wake_at = job.get_wake_at(self.scheduler_id)
+            if wake_at is None:
                 continue
-            if job.updated_at != item.updated_at or job.next_run_at != item.next_run_at:
+            if job.updated_at != item.updated_at or wake_at != item.wake_at:
                 continue
             due_jobs.append(job)
         return due_jobs
 
     async def dispatch_jobs_batch(self, cached_jobs: list[SchedulerJobState], current_time: datetime) -> None:
-        async with self.session_factory() as session:
-            jobs = await JobRepository.list_by_ids(session, [job.job_id for job in cached_jobs])
-            jobs_by_id = {str(job.id): job for job in jobs}
+        self.last_dispatch_started_at = current_time
+        async with self.session_factory() as read_session:
+            jobs = await JobRepository.list_by_ids(read_session, [job.job_id for job in cached_jobs])
+        jobs_by_id = {str(job.id): job for job in jobs}
+        claim_candidates: list[SchedulerJob] = []
 
-            runnable_jobs: list[SchedulerJob] = []
-            prepared_dispatches: list[PreparedDispatch] = []
-
-            for cached_job in cached_jobs:
-                job = jobs_by_id.get(cached_job.job_id)
-                if job is None:
-                    self.remove_job(cached_job.job_id)
-                    continue
-                if not job.is_enabled or job.next_run_at is None:
+        for cached_job in cached_jobs:
+            job = jobs_by_id.get(cached_job.job_id)
+            if job is None:
+                self.remove_job(cached_job.job_id)
+                continue
+            if not job.is_enabled or job.next_run_at is None:
+                self.upsert_job(job)
+                continue
+            if normalize_utc(job.updated_at) != cached_job.updated_at:
+                self.upsert_job(job)
+                continue
+            if job.claimed_by and job.claimed_by != self.scheduler_id and job.claim_expires_at is not None:
+                if normalize_utc(job.claim_expires_at) > current_time:
                     self.upsert_job(job)
+                    self.claim_conflict_count += 1
                     continue
-                if (
-                    job.updated_at.astimezone(UTC) != cached_job.updated_at
-                    or job.next_run_at.astimezone(UTC) != cached_job.next_run_at
-                ):
-                    self.upsert_job(job)
-                    continue
+            claim_candidates.append(job)
 
-                runnable_jobs.append(job)
+        if not claim_candidates:
+            self.last_dispatch_finished_at = datetime.now(UTC)
+            return
+
+        prepared_dispatches: list[PreparedDispatch] = []
+        async with self.session_factory() as claim_session:
+            for job in claim_candidates:
+                claimed_job = await JobRepository.claim_for_dispatch(
+                    claim_session,
+                    job_id=str(job.id),
+                    claimed_at=current_time,
+                    owner=self.scheduler_id,
+                    lease_ttl_seconds=self.config.claim_ttl_seconds,
+                )
+                if claimed_job is None:
+                    refreshed_job = await JobRepository.get_by_id(claim_session, str(job.id))
+                    if refreshed_job is None:
+                        self.remove_job(str(job.id))
+                    else:
+                        self.upsert_job(refreshed_job)
+                        self.claim_conflict_count += 1
+                    continue
                 prepared_dispatches.append(
                     PreparedDispatch(
-                        job_id=str(job.id),
-                        task_name=job.task_name,
-                        task=self.registry.get_task(job.task_name),
-                        trigger=Scheduler.build_trigger(job),
-                        args=list(job.task_args or []),
-                        kwargs=dict(job.task_kwargs or {}),
-                        scheduled_for=job.next_run_at,
+                        job_id=str(claimed_job.id),
+                        task_name=claimed_job.task_name,
+                        task=self.registry.get_task(claimed_job.task_name),
+                        trigger=Scheduler.build_trigger(claimed_job),
+                        args=list(claimed_job.task_args or []),
+                        kwargs=dict(claimed_job.task_kwargs or {}),
+                        scheduled_for=claimed_job.next_run_at or current_time,
+                        claim_started_at=current_time,
                     )
                 )
+            await claim_session.commit()
 
-            if not prepared_dispatches:
-                await session.rollback()
-                return
+        if not prepared_dispatches:
+            self.last_dispatch_finished_at = datetime.now(UTC)
+            return
 
-            log.info("Dispatching scheduler jobs batch.", extra={"job_count": len(prepared_dispatches)})
-            outcomes = await self.execute_prepared_dispatches(prepared_dispatches)
-            runs_to_create: list[SchedulerRun] = []
+        self.claimed_job_count += len(prepared_dispatches)
+        log.info("Dispatching scheduler jobs batch.", extra={"job_count": len(prepared_dispatches)})
+        outcomes = await self.execute_prepared_dispatches(prepared_dispatches)
+        runs_to_create: list[SchedulerRun] = []
 
-            for job, prepared, outcome in zip(runnable_jobs, prepared_dispatches, outcomes, strict=True):
+        async with self.session_factory() as finalize_session:
+            runnable_job_ids = [prepared.job_id for prepared in prepared_dispatches]
+            runnable_jobs = await JobRepository.list_by_ids(
+                finalize_session,
+                runnable_job_ids,
+            )
+            runnable_jobs_by_id = {str(job.id): job for job in runnable_jobs}
+            finalized_jobs: list[SchedulerJob] = []
+
+            for prepared, outcome in zip(prepared_dispatches, outcomes, strict=True):
+                job = runnable_jobs_by_id.get(prepared.job_id)
+                if job is None:
+                    self.remove_job(prepared.job_id)
+                    continue
+                claimed_at = normalize_utc(job.claimed_at) if job.claimed_at is not None else None
+                if job.claimed_by != self.scheduler_id or claimed_at != prepared.claim_started_at:
+                    self.upsert_job(job)
+                    self.claim_conflict_count += 1
+                    continue
                 self.apply_dispatch_outcome(
                     job=job,
                     prepared=prepared,
@@ -252,17 +350,44 @@ class SchedulerEngine:
                     current_time=current_time,
                     runs_to_create=runs_to_create,
                 )
+                finalized_jobs.append(job)
 
             if self.config.record_runs:
-                await RunRepository.create_many(session, runs_to_create)
+                await RunRepository.create_many(finalize_session, runs_to_create)
 
-            await session.commit()
+            await finalize_session.commit()
 
-            for job in runnable_jobs:
-                self.upsert_job(job) if job.is_enabled and job.next_run_at is not None else self.remove_job(str(job.id))
+        for job in finalized_jobs:
+            self.upsert_job(job) if job.is_enabled and job.next_run_at is not None else self.remove_job(str(job.id))
+        self.last_dispatch_finished_at = datetime.now(UTC)
 
     async def execute_prepared_dispatches(self, prepared_dispatches: list[PreparedDispatch]) -> list[DispatchOutcome]:
         semaphore = asyncio.Semaphore(self.config.dispatch_concurrency)
+        keepalive_stop = asyncio.Event()
+
+        async def keep_claims_alive() -> None:
+            refresh_interval = max(self.config.claim_ttl_seconds / 3, 0.1)
+            grouped_job_ids: dict[datetime, list[str]] = {}
+            for prepared in prepared_dispatches:
+                grouped_job_ids.setdefault(prepared.claim_started_at, []).append(prepared.job_id)
+
+            while not keepalive_stop.is_set():
+                try:
+                    await asyncio.wait_for(keepalive_stop.wait(), timeout=refresh_interval)
+                    return
+                except TimeoutError:
+                    current_time = datetime.now(UTC)
+                    async with self.session_factory() as session:
+                        for claim_started_at, job_ids in grouped_job_ids.items():
+                            await JobRepository.extend_claims(
+                                session,
+                                job_ids=job_ids,
+                                owner=self.scheduler_id,
+                                claimed_at=claim_started_at,
+                                lease_ttl_seconds=self.config.claim_ttl_seconds,
+                                current_time=current_time,
+                            )
+                        await session.commit()
 
         async def run_single(prepared: PreparedDispatch) -> DispatchOutcome:
             async with semaphore:
@@ -296,7 +421,12 @@ class SchedulerEngine:
                     finished_at=finished_at,
                 )
 
-        return list(await asyncio.gather(*(run_single(prepared) for prepared in prepared_dispatches)))
+        keepalive_task = asyncio.create_task(keep_claims_alive())
+        try:
+            return list(await asyncio.gather(*(run_single(prepared) for prepared in prepared_dispatches)))
+        finally:
+            keepalive_stop.set()
+            await asyncio.gather(keepalive_task, return_exceptions=True)
 
     def apply_dispatch_outcome(
         self,
@@ -307,11 +437,15 @@ class SchedulerEngine:
         current_time: datetime,
         runs_to_create: list[SchedulerRun],
     ) -> None:
+        job.claimed_by = None
+        job.claimed_at = None
+        job.claim_expires_at = None
         if outcome.status == "failed":
             retry_from = outcome.finished_at or outcome.dispatched_at or current_time
             job.last_error = outcome.error
             job.next_run_at = retry_from + timedelta(seconds=self.config.dispatch_retry_seconds)
             job.updated_at = retry_from
+            self.failed_dispatch_count += 1
             log.warning(
                 "Scheduler job dispatch failed; retry scheduled.",
                 extra={
@@ -342,11 +476,13 @@ class SchedulerEngine:
         job.last_dispatched_task_id = outcome.broker_task_id
         job.dispatch_count += 1
         job.updated_at = finished_at
+        self.dispatched_job_count += 1
 
         if job.kind == "one_off":
             job.is_enabled = False
             job.next_run_at = None
         else:
+            assert isinstance(prepared.trigger, PeriodicSchedule)
             next_run_at = prepared.trigger.get_next_run_at(dispatched_at, anchor=job.created_at)
             job.next_run_at = next_run_at
             if next_run_at is None:
@@ -374,3 +510,43 @@ class SchedulerEngine:
                     updated_at=finished_at,
                 )
             )
+
+    async def cleanup_runs(self) -> None:
+        retention_days = self.config.run_history_retention_days
+        if retention_days is None:
+            return
+        current_time = datetime.now(UTC)
+        if self.last_cleanup_at is not None:
+            elapsed = (current_time - self.last_cleanup_at).total_seconds()
+            if elapsed < self.config.run_cleanup_interval_seconds:
+                return
+        cutoff = current_time - timedelta(days=retention_days)
+        async with self.session_factory() as session:
+            deleted_runs = await RunRepository.purge_finished_before(session, cutoff)
+            await session.commit()
+        self.last_cleanup_at = current_time
+        self.cleaned_run_count += deleted_runs
+        if deleted_runs:
+            log.info(
+                "Scheduler engine cleaned old run history.",
+                extra={"deleted_run_count": deleted_runs, "finished_before": cutoff.isoformat()},
+            )
+
+    def get_health_snapshot(self) -> SchedulerHealthSnapshot:
+        active_job_count = sum(1 for job in self.jobs.values() if job.is_enabled and job.next_run_at is not None)
+        return SchedulerHealthSnapshot(
+            scheduler_id=self.scheduler_id,
+            is_running=self.runner_task is not None and not self.runner_task.done(),
+            active_job_count=active_job_count,
+            heap_size=len(self.heap),
+            sync_count=self.sync_count,
+            claimed_job_count=self.claimed_job_count,
+            dispatched_job_count=self.dispatched_job_count,
+            failed_dispatch_count=self.failed_dispatch_count,
+            claim_conflict_count=self.claim_conflict_count,
+            cleaned_run_count=self.cleaned_run_count,
+            last_sync_at=self.last_sync_at,
+            last_dispatch_started_at=self.last_dispatch_started_at,
+            last_dispatch_finished_at=self.last_dispatch_finished_at,
+            last_cleanup_at=self.last_cleanup_at,
+        )

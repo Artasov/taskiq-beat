@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
 import logging
-from typing import Any
+from collections.abc import Sequence
+from datetime import UTC, datetime
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from taskiq_beat.config import SchedulerConfig
-from taskiq_beat.engine import SchedulerEngine
+from taskiq_beat.engine import SchedulerEngine, SchedulerHealthSnapshot
 from taskiq_beat.models import SchedulerJob
 from taskiq_beat.registry import TaskRegistry
-from taskiq_beat.repositories import JobRepository
+from taskiq_beat.repositories import JobRepository, RunRepository
 from taskiq_beat.scheduler import Scheduler
+from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
+from taskiq_beat.types import TaskiqBroker, TaskLoader, TaskReference
 
-TaskLoader = Callable[[], tuple[str, ...]]
 log = logging.getLogger(__name__)
 
 
@@ -22,8 +22,8 @@ class SchedulerApp:
     def __init__(
         self,
         *,
-        broker: Any,
-        session_factory: Any,
+        broker: TaskiqBroker,
+        session_factory: async_sessionmaker[AsyncSession],
         config: SchedulerConfig | None = None,
         task_loader: TaskLoader | None = None,
     ) -> None:
@@ -37,11 +37,58 @@ class SchedulerApp:
             config=self.config,
         )
 
-    def create_scheduler(self, *args, **kwargs) -> Scheduler:
-        return Scheduler(*args, **kwargs, registry=self.registry, engine=self.engine)
+    def create_scheduler(
+        self,
+        *,
+        task: TaskReference,
+        trigger: PeriodicSchedule | OneOffSchedule,
+        job_id: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        args: list[object] | None = None,
+        kwargs: dict[str, object] | None = None,
+        metadata: dict[str, object] | None = None,
+        is_enabled: bool = True,
+    ) -> Scheduler:
+        return Scheduler(
+            task=task,
+            trigger=trigger,
+            job_id=job_id,
+            name=name,
+            description=description,
+            args=list(args or []),
+            kwargs=dict(kwargs or {}),
+            metadata=dict(metadata or {}),
+            is_enabled=is_enabled,
+            registry=self.registry,
+            engine=self.engine,
+        )
 
-    async def upsert_schedule(self, session: AsyncSession, *args, **kwargs) -> SchedulerJob:
-        scheduler = self.create_scheduler(*args, **kwargs)
+    async def upsert_schedule(
+        self,
+        session: AsyncSession,
+        *,
+        task: TaskReference,
+        trigger: PeriodicSchedule | OneOffSchedule,
+        job_id: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        args: list[object] | None = None,
+        kwargs: dict[str, object] | None = None,
+        metadata: dict[str, object] | None = None,
+        is_enabled: bool = True,
+    ) -> SchedulerJob:
+        scheduler = self.create_scheduler(
+            task=task,
+            trigger=trigger,
+            job_id=job_id,
+            name=name,
+            description=description,
+            args=args,
+            kwargs=kwargs,
+            metadata=metadata,
+            is_enabled=is_enabled,
+        )
         return await scheduler.upsert(session)
 
     async def sync_schedules(self, session: AsyncSession, schedulers: Sequence[Scheduler]) -> list[SchedulerJob]:
@@ -73,6 +120,9 @@ class SchedulerApp:
         job = await self.get_job(session, job_id)
         job.is_enabled = False
         job.next_run_at = None
+        job.claimed_by = None
+        job.claimed_at = None
+        job.claim_expires_at = None
         job.updated_at = datetime.now(UTC)
         await session.commit()
         self.engine.upsert_job(job)
@@ -84,7 +134,13 @@ class SchedulerApp:
         trigger = Scheduler.build_trigger(job)
         current_time = datetime.now(UTC)
         job.is_enabled = True
-        job.next_run_at = self.create_scheduler(task=job.task_name, trigger=trigger).get_next_run_at(current_time, anchor=job.created_at)
+        job.claimed_by = None
+        job.claimed_at = None
+        job.claim_expires_at = None
+        job.next_run_at = self.create_scheduler(
+            task=job.task_name,
+            trigger=trigger,
+        ).get_next_run_at(current_time, anchor=job.created_at)
         job.updated_at = current_time
         await session.commit()
         self.engine.upsert_job(job)
@@ -103,9 +159,24 @@ class SchedulerApp:
         job = await self.get_job(session, job_id)
         current_time = datetime.now(UTC)
         job.is_enabled = True
+        job.claimed_by = None
+        job.claimed_at = None
+        job.claim_expires_at = None
         job.next_run_at = current_time
         job.updated_at = current_time
         await session.commit()
         self.engine.upsert_job(job)
         log.info("Scheduler job marked to run now.", extra={"job_id": str(job.id), "task_name": job.task_name})
         return job
+
+    async def purge_runs(self, session: AsyncSession, *, finished_before: datetime) -> int:
+        deleted_runs = await RunRepository.purge_finished_before(session, finished_before)
+        await session.commit()
+        log.info(
+            "Scheduler run history purged.",
+            extra={"deleted_run_count": deleted_runs, "finished_before": finished_before.isoformat()},
+        )
+        return deleted_runs
+
+    def get_health_snapshot(self) -> SchedulerHealthSnapshot:
+        return self.engine.get_health_snapshot()
