@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,7 @@ from taskiq_beat.repositories import JobRepository
 from taskiq_beat.scheduler import Scheduler
 
 TaskLoader = Callable[[], tuple[str, ...]]
+log = logging.getLogger(__name__)
 
 
 class SchedulerApp:
@@ -43,17 +45,23 @@ class SchedulerApp:
         return await scheduler.upsert(session)
 
     async def sync_schedules(self, session: AsyncSession, schedulers: Sequence[Scheduler]) -> list[SchedulerJob]:
+        log.info("Syncing scheduler definitions.", extra={"scheduler_count": len(schedulers)})
         jobs: list[SchedulerJob] = []
         for scheduler in schedulers:
             jobs.append(await scheduler.upsert(session))
+        log.info("Scheduler definitions synced.", extra={"job_count": len(jobs)})
         return jobs
 
     async def start(self) -> None:
+        log.info("Starting scheduler app.")
         self.registry.load()
         await self.engine.start()
+        log.info("Scheduler app started.")
 
     async def stop(self) -> None:
+        log.info("Stopping scheduler app.")
         await self.engine.stop()
+        log.info("Scheduler app stopped.")
 
     async def get_job(self, session: AsyncSession, job_id: str) -> SchedulerJob:
         job = await JobRepository.get_by_id(session, job_id)
@@ -68,6 +76,7 @@ class SchedulerApp:
         job.updated_at = datetime.now(UTC)
         await session.commit()
         self.engine.upsert_job(job)
+        log.info("Scheduler job paused.", extra={"job_id": str(job.id), "task_name": job.task_name})
         return job
 
     async def resume(self, session: AsyncSession, job_id: str) -> SchedulerJob:
@@ -79,13 +88,16 @@ class SchedulerApp:
         job.updated_at = current_time
         await session.commit()
         self.engine.upsert_job(job)
+        log.info("Scheduler job resumed.", extra={"job_id": str(job.id), "task_name": job.task_name})
         return job
 
     async def delete(self, session: AsyncSession, job_id: str) -> None:
         job = await self.get_job(session, job_id)
+        task_name = job.task_name
         await session.delete(job)
         await session.commit()
         self.engine.remove_job(str(job.id))
+        log.info("Scheduler job deleted.", extra={"job_id": str(job.id), "task_name": task_name})
 
     async def run_now(self, session: AsyncSession, job_id: str) -> SchedulerJob:
         job = await self.get_job(session, job_id)
@@ -95,4 +107,5 @@ class SchedulerApp:
         job.updated_at = current_time
         await session.commit()
         self.engine.upsert_job(job)
+        log.info("Scheduler job marked to run now.", extra={"job_id": str(job.id), "task_name": job.task_name})
         return job

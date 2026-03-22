@@ -21,6 +21,7 @@
 - [Create jobs](#create-jobs)
 - [Upsert and startup sync](#upsert-and-startup-sync)
 - [Manage jobs](#manage-jobs)
+- [Logging](#logging)
 - [Alembic](#alembic)
 - [Default configuration](#default-configuration)
 - [Create tables manually](#create-tables-manually)
@@ -332,6 +333,41 @@ async with session_factory() as session:
     await scheduler_app.run_now(session, job.id)
     await scheduler_app.delete(session, job.id)
 ```
+
+## Logging
+
+`taskiq-beat` uses the standard Python `logging` module.
+The library emits logs, but does not configure handlers, files, or external storage by itself.
+
+This is intentional:
+
+- the application decides where logs go
+- local development usually sends them to stdout
+- Docker setups usually read them through container logs
+- production systems usually forward them to Loki, ELK, Datadog, Cloud Logging, and similar tools
+
+Basic setup:
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+```
+
+This will show logs from `taskiq_beat.app`, `taskiq_beat.scheduler`, and `taskiq_beat.engine`.
+
+Typical events that are logged:
+
+- scheduler app start and stop
+- scheduler engine sync from storage
+- scheduler job create, upsert, pause, resume, run-now, delete
+- successful dispatches
+- dispatch failures with retry scheduling
+
+If your worker and API run in containers, it is usually enough to log to stdout and collect logs from Docker or Kubernetes.
 
 ## Alembic
 

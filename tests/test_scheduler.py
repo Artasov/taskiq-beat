@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import logging
 
 import pytest
 from sqlalchemy import select
@@ -195,3 +196,25 @@ async def test_scheduler_app_start_and_stop(scheduler_app: SchedulerApp) -> None
     assert scheduler_app.engine.runner_task is not None
     await scheduler_app.stop()
     assert scheduler_app.engine.runner_task is None
+
+
+@pytest.mark.asyncio()
+async def test_scheduler_app_logs_job_lifecycle(db_session, scheduler_app: SchedulerApp, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="taskiq_beat.app")
+    task = scheduler_app.registry.get_task("tests.echo")
+    job = await scheduler_app.create_scheduler(
+        task=task,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+    ).schedule(db_session)
+
+    await scheduler_app.pause(db_session, job.id)
+    await scheduler_app.resume(db_session, job.id)
+    await scheduler_app.run_now(db_session, job.id)
+    await scheduler_app.delete(db_session, job.id)
+
+    messages = [record.getMessage() for record in caplog.records if record.name == "taskiq_beat.app"]
+
+    assert "Scheduler job paused." in messages
+    assert "Scheduler job resumed." in messages
+    assert "Scheduler job marked to run now." in messages
+    assert "Scheduler job deleted." in messages
