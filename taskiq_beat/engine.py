@@ -82,18 +82,23 @@ class SchedulerEngine:
 
     async def start(self) -> None:
         if self.runner_task is not None:
+            log.debug("Scheduler engine start skipped because it is already running.")
             return
+        log.info("Starting scheduler engine.")
         await self.sync_all()
         self.stop_event.clear()
         self.runner_task = asyncio.create_task(self.run())
+        log.info("Scheduler engine started.")
 
     async def stop(self) -> None:
+        log.info("Stopping scheduler engine.")
         self.stop_event.set()
         self.wakeup_event.set()
         if self.runner_task is not None:
             self.runner_task.cancel()
         await asyncio.gather(*(task for task in (self.runner_task,) if task is not None), return_exceptions=True)
         self.runner_task = None
+        log.info("Scheduler engine stopped.")
 
     async def run(self) -> None:
         while not self.stop_event.is_set():
@@ -134,6 +139,7 @@ class SchedulerEngine:
         self.merge_jobs(active_jobs)
         current_time = datetime.now(UTC)
         self.last_sync_at = current_time
+        log.info("Scheduler engine synced jobs from storage.", extra={"active_job_count": len(active_jobs)})
 
     def merge_jobs(self, jobs: list[SchedulerJob]) -> None:
         for job in jobs:
@@ -162,10 +168,15 @@ class SchedulerEngine:
                 ),
             )
         self.wakeup_event.set()
+        log.debug(
+            "Scheduler engine upserted in-memory job state.",
+            extra={"job_id": state.job_id, "next_run_at": state.next_run_at.isoformat() if state.next_run_at else None},
+        )
 
     def remove_job(self, job_id: str) -> None:
         self.jobs.pop(job_id, None)
         self.wakeup_event.set()
+        log.debug("Scheduler engine removed in-memory job state.", extra={"job_id": job_id})
 
     async def dispatch_due_jobs(self) -> None:
         while True:
@@ -229,6 +240,7 @@ class SchedulerEngine:
                 await session.rollback()
                 return
 
+            log.info("Dispatching scheduler jobs batch.", extra={"job_count": len(prepared_dispatches)})
             outcomes = await self.execute_prepared_dispatches(prepared_dispatches)
             runs_to_create: list[SchedulerRun] = []
 
@@ -268,6 +280,14 @@ class SchedulerEngine:
                         finished_at=finished_at,
                     )
                 finished_at = datetime.now(UTC)
+                log.info(
+                    "Scheduler job dispatched.",
+                    extra={
+                        "job_id": prepared.job_id,
+                        "task_name": prepared.task_name,
+                        "broker_task_id": getattr(broker_task, "task_id", None),
+                    },
+                )
                 return DispatchOutcome(
                     job_id=prepared.job_id,
                     status="dispatched",
@@ -292,6 +312,14 @@ class SchedulerEngine:
             job.last_error = outcome.error
             job.next_run_at = retry_from + timedelta(seconds=self.config.dispatch_retry_seconds)
             job.updated_at = retry_from
+            log.warning(
+                "Scheduler job dispatch failed; retry scheduled.",
+                extra={
+                    "job_id": str(job.id),
+                    "task_name": job.task_name,
+                    "retry_at": job.next_run_at.isoformat() if job.next_run_at else None,
+                },
+            )
             if self.config.record_runs:
                 runs_to_create.append(
                     SchedulerRun(
@@ -323,6 +351,15 @@ class SchedulerEngine:
             job.next_run_at = next_run_at
             if next_run_at is None:
                 job.is_enabled = False
+        log.debug(
+            "Scheduler job state updated after dispatch.",
+            extra={
+                "job_id": str(job.id),
+                "task_name": job.task_name,
+                "is_enabled": job.is_enabled,
+                "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
+            },
+        )
 
         if self.config.record_runs:
             runs_to_create.append(

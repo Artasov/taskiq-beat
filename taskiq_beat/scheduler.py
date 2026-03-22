@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,8 @@ from taskiq_beat.models import SchedulerJob
 from taskiq_beat.registry import TaskRegistry
 from taskiq_beat.repositories import JobRepository
 from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -31,6 +34,7 @@ class Scheduler:
         await JobRepository.create(session, job)
         await session.commit()
         self.notify_engine(job)
+        log.info("Scheduler job created.", extra={"job_id": str(job.id), "task_name": job.task_name, "kind": job.kind})
         return job
 
     async def upsert(self, session: AsyncSession) -> SchedulerJob:
@@ -42,6 +46,15 @@ class Scheduler:
             await JobRepository.create(session, job)
         await session.commit()
         self.notify_engine(job)
+        log.info(
+            "Scheduler job upserted.",
+            extra={
+                "job_id": str(job.id),
+                "task_name": job.task_name,
+                "kind": job.kind,
+                "created": existing_job is None,
+            },
+        )
         return job
 
     def build_new_job(self) -> SchedulerJob:
@@ -112,6 +125,10 @@ class Scheduler:
         existing_job.is_enabled = True
         if should_recalculate:
             existing_job.next_run_at = self.get_next_run_at(current_time, anchor=existing_job.created_at)
+            log.debug(
+                "Recalculated next run for scheduler job.",
+                extra={"job_id": str(existing_job.id), "task_name": existing_job.task_name},
+            )
         return existing_job
 
     def get_registry(self) -> TaskRegistry:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import logging
 
 import pytest
 from sqlalchemy import select
@@ -158,3 +159,30 @@ async def test_engine_dispatches_periodic_job_multiple_times(monkeypatch, sessio
     assert stored_job.dispatch_count >= 2
     assert stored_job.is_enabled is True
     assert len(runs) >= 2
+
+
+@pytest.mark.asyncio()
+async def test_engine_logs_dispatch_lifecycle(monkeypatch, session_factory, scheduler_app: SchedulerApp, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="taskiq_beat.engine")
+    task = scheduler_app.registry.get_task("tests.ping")
+
+    async def fake_kiq(*args, **kwargs):
+        class Result:
+            task_id = "task-1"
+
+        return Result()
+
+    monkeypatch.setattr(task, "kiq", fake_kiq)
+
+    async with session_factory() as session:
+        await scheduler_app.create_scheduler(
+            task=task,
+            trigger=OneOffSchedule(run_at=datetime.now(UTC) - timedelta(seconds=1)),
+        ).schedule(session)
+
+    await scheduler_app.engine.run_once()
+
+    messages = [record.getMessage() for record in caplog.records if record.name == "taskiq_beat.engine"]
+
+    assert "Dispatching scheduler jobs batch." in messages
+    assert "Scheduler job dispatched." in messages
