@@ -139,20 +139,20 @@ class CrontabTrigger:
 
     @classmethod
     def every(
-        cls,
-        *,
-        seconds: int | None = None,
-        minutes: int | None = None,
-        hours: int | None = None,
-        days: int | None = None,
-        monday: str | None = None,
-        tuesday: str | None = None,
-        wednesday: str | None = None,
-        thursday: str | None = None,
-        friday: str | None = None,
-        saturday: str | None = None,
-        sunday: str | None = None,
-        timezone: str = DEFAULT_TIMEZONE,
+            cls,
+            *,
+            seconds: int | None = None,
+            minutes: int | None = None,
+            hours: int | None = None,
+            days: int | None = None,
+            monday: str | None = None,
+            tuesday: str | None = None,
+            wednesday: str | None = None,
+            thursday: str | None = None,
+            friday: str | None = None,
+            saturday: str | None = None,
+            sunday: str | None = None,
+            timezone: str = DEFAULT_TIMEZONE,
     ) -> CrontabTrigger:
         if seconds:
             return cls(second=f"*/{seconds}", timezone=timezone)
@@ -229,11 +229,11 @@ class CrontabTrigger:
                 current = self.move_month(current, months)
                 continue
             if not self.day_matches(
-                current=current,
-                days=days,
-                weekdays=weekdays,
-                day_of_month_matches_all=day_of_month_matches_all,
-                day_of_week_matches_all=day_of_week_matches_all,
+                    current=current,
+                    days=days,
+                    weekdays=weekdays,
+                    day_of_month_matches_all=day_of_month_matches_all,
+                    day_of_week_matches_all=day_of_week_matches_all,
             ):
                 current = (current + timedelta(days=1)).replace(hour=0, minute=0, second=0)
                 continue
@@ -276,12 +276,12 @@ class CrontabTrigger:
 
     @staticmethod
     def day_matches(
-        *,
-        current: datetime,
-        days: set[int],
-        weekdays: set[int],
-        day_of_month_matches_all: bool,
-        day_of_week_matches_all: bool,
+            *,
+            current: datetime,
+            days: set[int],
+            weekdays: set[int],
+            day_of_month_matches_all: bool,
+            day_of_week_matches_all: bool,
     ) -> bool:
         day_matches = current.day in days
         weekday_matches = current.weekday() in weekdays

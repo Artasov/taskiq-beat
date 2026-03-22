@@ -102,12 +102,12 @@ class Scheduler:
         metadata = dict(self.metadata)
 
         schedule_changed = (
-            existing_job.task_name != task_name
-            or existing_job.kind != kind
-            or existing_job.strategy != strategy
-            or dict(existing_job.trigger_payload or {}) != trigger_payload
-            or list(existing_job.task_args or []) != args
-            or dict(existing_job.task_kwargs or {}) != kwargs
+                existing_job.task_name != task_name
+                or existing_job.kind != kind
+                or existing_job.strategy != strategy
+                or dict(existing_job.trigger_payload or {}) != trigger_payload
+                or list(existing_job.task_args or []) != args
+                or dict(existing_job.task_kwargs or {}) != kwargs
         )
 
         existing_job.name = self.name

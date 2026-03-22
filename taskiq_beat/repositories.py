@@ -37,13 +37,13 @@ class JobRepository:
 
     @classmethod
     async def claim_for_dispatch(
-        cls,
-        session: AsyncSession,
-        *,
-        job_id: str,
-        claimed_at: datetime,
-        owner: str,
-        lease_ttl_seconds: int,
+            cls,
+            session: AsyncSession,
+            *,
+            job_id: str,
+            claimed_at: datetime,
+            owner: str,
+            lease_ttl_seconds: int,
     ) -> SchedulerJob | None:
         claim_expires_at = claimed_at + timedelta(seconds=lease_ttl_seconds)
         conditions = (
@@ -78,14 +78,14 @@ class JobRepository:
 
     @classmethod
     async def extend_claims(
-        cls,
-        session: AsyncSession,
-        *,
-        job_ids: list[str],
-        owner: str,
-        claimed_at: datetime,
-        lease_ttl_seconds: int,
-        current_time: datetime,
+            cls,
+            session: AsyncSession,
+            *,
+            job_ids: list[str],
+            owner: str,
+            claimed_at: datetime,
+            lease_ttl_seconds: int,
+            current_time: datetime,
     ) -> int:
         if not job_ids:
             return 0
