@@ -7,6 +7,7 @@ from taskiq_beat.models import SchedulerBase
 
 
 async def clear_scheduler_tables(factory: async_sessionmaker[AsyncSession]) -> None:
+    """Remove scheduler rows from all tables while preserving the schema."""
     async with factory() as session:
         if session.bind is not None and session.bind.dialect.name == "sqlite":
             await session.execute(text("PRAGMA foreign_keys=OFF"))

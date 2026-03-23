@@ -8,10 +8,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class SchedulerBase(DeclarativeBase):
+    """Shared declarative base for scheduler tables."""
+
     pass
 
 
 class SchedulerJob(SchedulerBase):
+    """Persisted scheduler definition and its current dispatch state."""
+
     __tablename__ = "scheduler_job"
     __table_args__ = (
         Index("ix_scheduler_job_ready_lookup", "is_enabled", "next_run_at", "claim_expires_at"),
@@ -42,6 +46,8 @@ class SchedulerJob(SchedulerBase):
 
 
 class SchedulerRun(SchedulerBase):
+    """Historical record for a single dispatch attempt."""
+
     __tablename__ = "scheduler_run"
     __table_args__ = (
         Index("ix_scheduler_run_job_finished", "job_id", "finished_at"),

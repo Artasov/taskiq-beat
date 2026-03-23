@@ -8,6 +8,8 @@ DEFAULT_TIMEZONE = "UTC"
 
 @dataclass(slots=True, frozen=True)
 class SchedulerConfig:
+    """Runtime settings for polling, claiming, dispatch, and cleanup."""
+
     scheduler_id: str = field(default_factory=lambda: uuid4().hex)
     sync_interval_seconds: float = 1.0
     idle_sleep_seconds: float = 0.2
@@ -21,6 +23,7 @@ class SchedulerConfig:
     default_timezone: str = DEFAULT_TIMEZONE
 
     def __post_init__(self) -> None:
+        """Validate numeric limits eagerly to fail fast on bad config."""
         if not self.scheduler_id.strip():
             raise ValueError("scheduler_id must not be empty.")
         if self.sync_interval_seconds <= 0:

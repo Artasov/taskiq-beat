@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class SchedulerHeapItem:
+    """Heap entry used to wake the engine when a job may become runnable."""
+
     wake_at: datetime
     updated_at: datetime
     job_id: str
@@ -38,6 +40,8 @@ class SchedulerHeapItem:
 
 @dataclass(slots=True, frozen=True)
 class SchedulerJobState:
+    """Compact in-memory snapshot of the fields relevant for dispatch."""
+
     job_id: str
     is_enabled: bool
     next_run_at: datetime | None
@@ -47,6 +51,7 @@ class SchedulerJobState:
 
     @classmethod
     def from_job(cls, job: SchedulerJob) -> SchedulerJobState:
+        """Project a database model into the engine's lightweight state."""
         next_run_at = normalize_utc(job.next_run_at) if job.next_run_at is not None else None
         return cls(
             job_id=str(job.id),
@@ -58,6 +63,7 @@ class SchedulerJobState:
         )
 
     def get_wake_at(self, scheduler_id: str) -> datetime | None:
+        """Return when this scheduler should wake up for the job again."""
         if not self.is_enabled or self.next_run_at is None:
             return None
         if self.claimed_by and self.claimed_by != scheduler_id and self.claim_expires_at is not None:
@@ -67,6 +73,8 @@ class SchedulerJobState:
 
 @dataclass(slots=True, frozen=True)
 class PreparedDispatch:
+    """Dispatch payload captured after a job has been successfully claimed."""
+
     job_id: str
     task_name: str
     task: TaskiqTask
@@ -79,6 +87,8 @@ class PreparedDispatch:
 
 @dataclass(slots=True, frozen=True)
 class DispatchOutcome:
+    """Result of trying to enqueue a job into the broker."""
+
     job_id: str
     status: str
     broker_task_id: str | None = None
@@ -89,6 +99,8 @@ class DispatchOutcome:
 
 @dataclass(slots=True, frozen=True)
 class SchedulerHealthSnapshot:
+    """Observable engine counters and timestamps for monitoring."""
+
     scheduler_id: str
     is_running: bool
     active_job_count: int
@@ -106,6 +118,8 @@ class SchedulerHealthSnapshot:
 
 
 class SchedulerEngine:
+    """Background loop that syncs jobs, claims due work, and dispatches tasks."""
+
     def __init__(
             self,
             *,
@@ -134,6 +148,7 @@ class SchedulerEngine:
         self.runner_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        """Prime in-memory state and start the background runner task."""
         if self.runner_task is not None:
             log.debug("Scheduler engine start skipped because it is already running.")
             return
@@ -144,6 +159,7 @@ class SchedulerEngine:
         log.info("Scheduler engine started.")
 
     async def stop(self) -> None:
+        """Stop the background loop and cancel the active runner task."""
         log.info("Stopping scheduler engine.")
         self.stop_event.set()
         self.wakeup_event.set()
@@ -154,16 +170,19 @@ class SchedulerEngine:
         log.info("Scheduler engine stopped.")
 
     async def run(self) -> None:
+        """Main polling loop for sync, dispatch, and cleanup."""
         while not self.stop_event.is_set():
             await self.run_once()
             await self.wait_next_tick()
 
     async def run_once(self) -> None:
+        """Execute one engine iteration."""
         await self.sync_storage()
         await self.dispatch_due_jobs()
         await self.cleanup_runs()
 
     async def wait_next_tick(self) -> None:
+        """Sleep until the next wakeup signal or the computed timeout."""
         timeout = self.get_sleep_timeout()
         try:
             await asyncio.wait_for(self.wakeup_event.wait(), timeout=timeout)
@@ -173,6 +192,7 @@ class SchedulerEngine:
             self.wakeup_event.clear()
 
     def get_sleep_timeout(self) -> float:
+        """Choose the next sleep interval from heap state and config bounds."""
         if not self.heap:
             return self.config.sync_interval_seconds
         head = self.heap[0]
@@ -180,12 +200,14 @@ class SchedulerEngine:
         return max(min(seconds_left, self.config.sync_interval_seconds), self.config.idle_sleep_seconds)
 
     async def sync_storage(self) -> None:
+        """Refresh all jobs from storage when the sync interval has elapsed."""
         current_time = datetime.now(UTC)
         if self.jobs and (current_time - self.last_sync_at).total_seconds() < self.config.sync_interval_seconds:
             return
         await self.sync_all()
 
     async def sync_all(self) -> None:
+        """Reload active jobs from storage and rebuild the wakeup heap."""
         async with self.session_factory() as session:
             active_jobs = await JobRepository.list_active(session)
         self.jobs = {}
@@ -197,6 +219,7 @@ class SchedulerEngine:
         log.info("Scheduler engine synced jobs from storage.", extra={"active_job_count": len(active_jobs)})
 
     def merge_jobs(self, jobs: list[SchedulerJob]) -> None:
+        """Merge storage rows into in-memory state and wakeup heap."""
         for job in jobs:
             state = SchedulerJobState.from_job(job)
             self.jobs[state.job_id] = state
@@ -211,6 +234,7 @@ class SchedulerEngine:
                 )
 
     def upsert_job(self, job: SchedulerJob) -> None:
+        """Apply a single job update to in-memory state and wake up the loop."""
         state = SchedulerJobState.from_job(job)
         self.jobs[state.job_id] = state
         wake_at = state.get_wake_at(self.scheduler_id)
@@ -234,14 +258,17 @@ class SchedulerEngine:
         )
 
     def remove_job(self, job_id: str) -> None:
+        """Drop a job from in-memory state."""
         self.jobs.pop(job_id, None)
         self.wakeup_event.set()
         log.debug("Scheduler engine removed in-memory job state.", extra={"job_id": job_id})
 
     def push_heap_item(self, item: SchedulerHeapItem) -> None:
+        """Push a new wakeup candidate into the min-heap."""
         heapq.heappush(self.heap, item)
 
     async def dispatch_due_jobs(self) -> None:
+        """Dispatch due jobs in batches until no runnable jobs remain."""
         while True:
             current_time = datetime.now(UTC)
             due_jobs = self.collect_due_jobs(current_time)
@@ -250,6 +277,7 @@ class SchedulerEngine:
             await self.dispatch_jobs_batch(due_jobs, current_time)
 
     def collect_due_jobs(self, current_time: datetime) -> list[SchedulerJobState]:
+        """Pop due heap entries and discard stale snapshots on the way."""
         due_jobs: list[SchedulerJobState] = []
         while self.heap and self.heap[0].wake_at <= current_time and len(due_jobs) < self.config.dispatch_batch_size:
             item = heapq.heappop(self.heap)
@@ -259,12 +287,14 @@ class SchedulerEngine:
             wake_at = job.get_wake_at(self.scheduler_id)
             if wake_at is None:
                 continue
+            # Heap items are append-only; stale entries are filtered here.
             if job.updated_at != item.updated_at or wake_at != item.wake_at:
                 continue
             due_jobs.append(job)
         return due_jobs
 
     async def dispatch_jobs_batch(self, cached_jobs: list[SchedulerJobState], current_time: datetime) -> None:
+        """Claim a batch of jobs, dispatch them, and persist the outcomes."""
         self.last_dispatch_started_at = current_time
         async with self.session_factory() as read_session:
             jobs = await JobRepository.list_by_ids(read_session, [job.job_id for job in cached_jobs])
@@ -283,6 +313,7 @@ class SchedulerEngine:
                 self.upsert_job(job)
                 continue
             if job.claimed_by and job.claimed_by != self.scheduler_id and job.claim_expires_at is not None:
+                # Another scheduler still owns a live lease for this job.
                 if normalize_utc(job.claim_expires_at) > current_time:
                     self.upsert_job(job)
                     self.claim_conflict_count += 1
@@ -372,6 +403,7 @@ class SchedulerEngine:
         self.last_dispatch_finished_at = datetime.now(UTC)
 
     async def execute_prepared_dispatches(self, prepared_dispatches: list[PreparedDispatch]) -> list[DispatchOutcome]:
+        """Dispatch claimed jobs concurrently while extending their claim lease."""
         semaphore = asyncio.Semaphore(self.config.dispatch_concurrency)
         keepalive_stop = asyncio.Event()
 
@@ -386,6 +418,8 @@ class SchedulerEngine:
                     await asyncio.wait_for(keepalive_stop.wait(), timeout=refresh_interval)
                     return
                 except TimeoutError:
+                    # Claims are grouped by claimed_at because lease refresh uses
+                    # the original claim timestamp as part of the update filter.
                     current_time = datetime.now(UTC)
                     async with self.session_factory() as session:
                         for claim_started_at, job_ids in grouped_job_ids.items():
@@ -447,6 +481,7 @@ class SchedulerEngine:
             current_time: datetime,
             runs_to_create: list[SchedulerRun],
     ) -> None:
+        """Apply the broker result and compute the job's next persisted state."""
         job.claimed_by = None
         job.claimed_at = None
         job.claim_expires_at = None
@@ -494,6 +529,8 @@ class SchedulerEngine:
             job.next_run_at = None
         else:
             assert isinstance(prepared.trigger, PeriodicSchedule)
+            # Periodic schedules advance from actual dispatch time so delayed runs
+            # do not immediately schedule duplicate catch-up executions.
             next_run_at = prepared.trigger.get_next_run_at(dispatched_at, anchor=job.created_at)
             job.next_run_at = next_run_at
             if next_run_at is None:
@@ -525,6 +562,7 @@ class SchedulerEngine:
             )
 
     async def cleanup_runs(self) -> None:
+        """Periodically purge old run history when retention is configured."""
         retention_days = self.config.run_history_retention_days
         if retention_days is None:
             return
@@ -546,6 +584,7 @@ class SchedulerEngine:
             )
 
     def get_health_snapshot(self) -> SchedulerHealthSnapshot:
+        """Return a point-in-time summary of engine state."""
         active_job_count = sum(1 for job in self.jobs.values() if job.is_enabled and job.next_run_at is not None)
         return SchedulerHealthSnapshot(
             scheduler_id=self.scheduler_id,

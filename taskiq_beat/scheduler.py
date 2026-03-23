@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class Scheduler:
+    """Declarative description of a single persisted scheduler job."""
+
     task: TaskReference
     trigger: PeriodicSchedule | OneOffSchedule
     job_id: str | None = None
@@ -35,6 +37,7 @@ class Scheduler:
     engine: SchedulerEngine | None = None
 
     async def schedule(self, session: AsyncSession) -> SchedulerJob:
+        """Create a new job row from this scheduler definition."""
         job = self.build_new_job()
         await JobRepository.create(session, job)
         await session.commit()
@@ -43,6 +46,7 @@ class Scheduler:
         return job
 
     async def upsert(self, session: AsyncSession) -> SchedulerJob:
+        """Insert a new job or update an existing one in place."""
         if self.job_id is None:
             return await self.schedule(session)
         existing_job = await JobRepository.get_by_id(session, self.job_id)
@@ -63,6 +67,7 @@ class Scheduler:
         return job
 
     def build_new_job(self) -> SchedulerJob:
+        """Materialize a fresh database model from the scheduler definition."""
         task_name = self.get_registry().validate_task(self.task)
         TaskRegistry.validate_payload(self.args, self.kwargs, self.metadata)
         created_at = datetime.now(UTC)
@@ -88,6 +93,7 @@ class Scheduler:
         )
 
     def build_existing_or_new_job(self, *, existing_job: SchedulerJob | None) -> SchedulerJob:
+        """Reuse an existing row and reschedule only when timing inputs changed."""
         if existing_job is None:
             return self.build_new_job()
 
@@ -101,6 +107,7 @@ class Scheduler:
         kwargs = dict(self.kwargs)
         metadata = dict(self.metadata)
 
+        # Only fields that affect dispatch timing should trigger a recalculation.
         schedule_changed = (
                 existing_job.task_name != task_name
                 or existing_job.kind != kind
@@ -140,6 +147,7 @@ class Scheduler:
         return existing_job
 
     def get_registry(self) -> TaskRegistry:
+        """Return the bound registry or fail if the scheduler is detached."""
         if self.registry is None:
             raise RuntimeError("Scheduler registry is not configured.")
         return self.registry
@@ -151,6 +159,7 @@ class Scheduler:
         return "one_off" if isinstance(self.trigger, OneOffSchedule) else self.trigger.strategy
 
     def get_next_run_at(self, current_time: datetime, *, anchor: datetime | None = None) -> datetime | None:
+        """Compute the next fire time for the current trigger."""
         normalized_current_time = normalize_utc(current_time)
         normalized_anchor = normalize_utc(anchor) if anchor is not None else normalized_current_time
         if isinstance(self.trigger, OneOffSchedule):
@@ -160,11 +169,13 @@ class Scheduler:
 
     @classmethod
     def build_trigger(cls, job: SchedulerJob) -> PeriodicSchedule | OneOffSchedule:
+        """Recreate the trigger object stored in the job payload."""
         if job.kind == "one_off":
             return OneOffSchedule.from_payload(job.trigger_payload)
         return PeriodicSchedule.from_payload(job.trigger_payload)
 
     def notify_engine(self, job: SchedulerJob) -> None:
+        """Push the latest job state into the running in-memory engine."""
         if self.engine is None:
             return
         self.engine.upsert_job(job)

@@ -10,6 +10,8 @@ from taskiq_beat.datetime_utils import normalize_timezone, normalize_utc
 
 
 class TimezoneResolver:
+    """Resolve configured timezone names into tzinfo objects."""
+
     @staticmethod
     def get(value: str):
         if value.upper() == "UTC":
@@ -18,8 +20,11 @@ class TimezoneResolver:
 
 
 class CronFieldSet:
+    """Parse and evaluate a single cron field expression."""
+
     @staticmethod
     def parse(expression: str, minimum: int, maximum: int) -> set[int]:
+        """Expand a cron fragment into the set of allowed integer values."""
         value = expression.strip()
         if not value:
             raise ValueError("Cron expression is empty.")
@@ -64,17 +69,21 @@ class CronFieldSet:
 
     @staticmethod
     def matches_all(expression: str, minimum: int, maximum: int) -> bool:
+        """Return True when the expression covers the whole allowed range."""
         return CronFieldSet.parse(expression, minimum, maximum) == set(range(minimum, maximum + 1))
 
 
 @dataclass(slots=True, frozen=True)
 class IntervalTrigger:
+    """Fixed interval trigger backed by exactly one time unit."""
+
     seconds: int | None = None
     minutes: int | None = None
     hours: int | None = None
     days: int | None = None
 
     def __post_init__(self) -> None:
+        """Enforce a single positive interval unit."""
         values = [value for value in (self.seconds, self.minutes, self.hours, self.days) if value is not None]
         if len(values) != 1:
             raise ValueError("Interval must contain exactly one unit.")
@@ -83,6 +92,7 @@ class IntervalTrigger:
 
     @property
     def total_seconds(self) -> int:
+        """Return the normalized interval length in seconds."""
         if self.seconds is not None:
             return self.seconds
         if self.minutes is not None:
@@ -109,6 +119,7 @@ class IntervalTrigger:
         )
 
     def get_next_run_at(self, after: datetime, *, anchor: datetime) -> datetime:
+        """Return the next interval boundary after the provided time."""
         base = normalize_utc(anchor).replace(microsecond=0)
         current = normalize_utc(after).replace(microsecond=0)
         if current < base:
@@ -120,6 +131,8 @@ class IntervalTrigger:
 
 @dataclass(slots=True, frozen=True)
 class CrontabTrigger:
+    """Cron-style trigger with optional timezone-aware evaluation."""
+
     second: str = "0"
     minute: str = "*"
     hour: str = "*"
@@ -129,6 +142,7 @@ class CrontabTrigger:
     timezone: str = DEFAULT_TIMEZONE
 
     def __post_init__(self) -> None:
+        """Validate timezone and all cron fields at construction time."""
         TimezoneResolver.get(self.timezone)
         CronFieldSet.parse(self.second, 0, 59)
         CronFieldSet.parse(self.minute, 0, 59)
@@ -154,6 +168,7 @@ class CrontabTrigger:
             sunday: str | None = None,
             timezone: str = DEFAULT_TIMEZONE,
     ) -> CrontabTrigger:
+        """Build common cron schedules from interval-like arguments."""
         if seconds:
             return cls(second=f"*/{seconds}", timezone=timezone)
         if minutes:
@@ -180,6 +195,7 @@ class CrontabTrigger:
 
     @staticmethod
     def parse_time(value: str) -> tuple[int, int]:
+        """Parse a HH:MM value used by weekday convenience arguments."""
         match = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
         if not match:
             raise ValueError(f"Invalid time format: {value}")
@@ -212,6 +228,7 @@ class CrontabTrigger:
         )
 
     def get_next_run_at(self, after: datetime) -> datetime:
+        """Find the next datetime matching the cron expression."""
         timezone = TimezoneResolver.get(self.timezone)
         current = normalize_timezone(after, timezone).replace(microsecond=0) + timedelta(seconds=1)
         seconds = sorted(CronFieldSet.parse(self.second, 0, 59))
@@ -225,6 +242,7 @@ class CrontabTrigger:
         limit = current + timedelta(days=366 * 5)
 
         while current <= limit:
+            # Jump through larger calendar buckets first to avoid dense scanning.
             if current.month not in months:
                 current = self.move_month(current, months)
                 continue
@@ -263,6 +281,7 @@ class CrontabTrigger:
 
     @staticmethod
     def next_value(values: list[int], current: int) -> int:
+        """Return the first allowed value at or after current, wrapping if needed."""
         for value in values:
             if value >= current:
                 return value
@@ -270,6 +289,7 @@ class CrontabTrigger:
 
     @staticmethod
     def move_month(current: datetime, allowed_months: set[int]) -> datetime:
+        """Advance to the next allowed month and reset lower-order fields."""
         target_month = min((item for item in allowed_months if item > current.month), default=min(allowed_months))
         year = current.year + 1 if target_month <= current.month else current.year
         return current.replace(year=year, month=target_month, day=1, hour=0, minute=0, second=0)
@@ -283,6 +303,7 @@ class CrontabTrigger:
             day_of_month_matches_all: bool,
             day_of_week_matches_all: bool,
     ) -> bool:
+        """Apply cron day-of-month/day-of-week matching semantics."""
         day_matches = current.day in days
         weekday_matches = current.weekday() in weekdays
         if day_of_month_matches_all and day_of_week_matches_all:
@@ -296,12 +317,15 @@ class CrontabTrigger:
 
 @dataclass(slots=True, frozen=True)
 class PeriodicSchedule:
+    """Schedule definition for recurring interval- or cron-based jobs."""
+
     interval: IntervalTrigger | None = None
     crontab: CrontabTrigger | None = None
     start_at: datetime | None = None
     end_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        """Validate trigger choice and optional schedule window bounds."""
         if (self.interval is None) == (self.crontab is None):
             raise ValueError("Periodic schedule must contain either interval or crontab.")
         if self.start_at is not None and self.start_at.tzinfo is None:
@@ -313,6 +337,7 @@ class PeriodicSchedule:
 
     @property
     def strategy(self) -> str:
+        """Expose the active trigger strategy for persistence."""
         return "interval" if self.interval is not None else "crontab"
 
     def to_payload(self) -> dict:
@@ -336,6 +361,7 @@ class PeriodicSchedule:
         )
 
     def get_next_run_at(self, after: datetime, *, anchor: datetime) -> datetime | None:
+        """Compute the next run inside the optional start/end window."""
         current = normalize_utc(after)
         normalized_start_at = normalize_utc(self.start_at) if self.start_at is not None else None
         normalized_end_at = normalize_utc(self.end_at) if self.end_at is not None else None
@@ -346,6 +372,7 @@ class PeriodicSchedule:
             next_run = self.interval.get_next_run_at(current, anchor=interval_anchor)
         else:
             assert self.crontab is not None
+            # Search from just before start_at so a boundary match is preserved.
             baseline = (
                 normalized_start_at - timedelta(seconds=1)
                 if normalized_start_at is not None and current < normalized_start_at
@@ -359,9 +386,12 @@ class PeriodicSchedule:
 
 @dataclass(slots=True, frozen=True)
 class OneOffSchedule:
+    """Schedule definition for a job that should run exactly once."""
+
     run_at: datetime
 
     def __post_init__(self) -> None:
+        """Require an explicit timezone to avoid ambiguous execution times."""
         if self.run_at.tzinfo is None:
             raise ValueError("One-off schedule run_at must be timezone-aware.")
 

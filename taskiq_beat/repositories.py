@@ -9,6 +9,8 @@ from taskiq_beat.models import SchedulerJob, SchedulerRun
 
 
 class JobRepository:
+    """Database helpers for scheduler jobs."""
+
     @classmethod
     async def create(cls, session: AsyncSession, job: SchedulerJob) -> SchedulerJob:
         session.add(job)
@@ -45,6 +47,7 @@ class JobRepository:
             owner: str,
             lease_ttl_seconds: int,
     ) -> SchedulerJob | None:
+        """Atomically lease a due job for dispatch if it is still claimable."""
         claim_expires_at = claimed_at + timedelta(seconds=lease_ttl_seconds)
         conditions = (
             SchedulerJob.id == job_id,
@@ -87,6 +90,7 @@ class JobRepository:
             lease_ttl_seconds: int,
             current_time: datetime,
     ) -> int:
+        """Refresh claims for in-flight dispatches still owned by this scheduler."""
         if not job_ids:
             return 0
         statement = (
@@ -104,6 +108,8 @@ class JobRepository:
 
 
 class RunRepository:
+    """Database helpers for scheduler execution history."""
+
     @classmethod
     async def create(cls, session: AsyncSession, run: SchedulerRun) -> SchedulerRun:
         session.add(run)
@@ -119,6 +125,7 @@ class RunRepository:
 
     @classmethod
     async def purge_finished_before(cls, session: AsyncSession, finished_before: datetime) -> int:
+        """Delete completed runs older than the given timestamp."""
         statement = delete(SchedulerRun).where(
             SchedulerRun.finished_at.is_not(None),
             SchedulerRun.finished_at < finished_before,
