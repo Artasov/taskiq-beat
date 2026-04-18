@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from taskiq.decor import AsyncTaskiqDecoratedTask
 from taskiq.task import AsyncTaskiqTask
 
-
 type TaskiqDispatchResult = AsyncTaskiqTask[Any]
 
 
