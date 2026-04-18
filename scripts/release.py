@@ -7,7 +7,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT_DIR / "taskiq_beat" / "_version.py"
 VERSION_PATTERN = re.compile(r'(?P<prefix>__version__\s*=\s*")(?P<version>\d+\.\d+\.\d+)(?P<suffix>")')
@@ -35,7 +34,7 @@ class ReleaseService:
         next_version = self.bump_version(current_version, part)
         tag_name = f"{self.config.tag_prefix}{next_version}"
 
-        print(f"Package: taskiq-beat")
+        print("Package: taskiq-beat")
         print(f"Current version: {current_version}")
         print(f"Next version: {next_version}")
         print(f"Tag: {tag_name}")
@@ -82,7 +81,7 @@ class ReleaseService:
         self.git("add", self.to_git_path(self.config.version_file))
 
     def bump_version(self, current_version: str, part: str) -> str:
-        major, minor, patch = [int(item) for item in current_version.split(".")]
+        major, minor, patch = (int(item) for item in current_version.split("."))
         if part == "patch":
             patch += 1
         elif part == "minor":
@@ -147,7 +146,11 @@ class ReleaseCli:
         parser = argparse.ArgumentParser(description="Bump taskiq-beat version and create a release tag.")
         parser.add_argument("part", choices=("patch", "minor", "major"))
         parser.add_argument("--push", action="store_true", help="Push commit and tag after local release.")
-        parser.add_argument("--dry-run", action="store_true", help="Only show the next version without changing anything.")
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Only show the next version without changing anything.",
+        )
         return parser
 
     def main(self) -> int:
