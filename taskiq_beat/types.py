@@ -5,12 +5,10 @@ from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from taskiq.decor import AsyncTaskiqDecoratedTask
+from taskiq.task import AsyncTaskiqTask
 
 
-class TaskiqDispatchResult(Protocol):
-    """Minimal Taskiq dispatch result shape required by this package."""
-
-    task_id: str | None
+type TaskiqDispatchResult = AsyncTaskiqTask[Any]
 
 
 class TaskiqTask(Protocol):
