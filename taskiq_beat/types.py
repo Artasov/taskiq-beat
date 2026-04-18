@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from taskiq.decor import AsyncTaskiqDecoratedTask
 
 
 class TaskiqDispatchResult(Protocol):
@@ -23,7 +24,9 @@ class TaskiqTask(Protocol):
 class TaskiqBroker(Protocol):
     """Minimal broker interface needed to resolve registered tasks."""
 
-    def find_task(self, task_name: str) -> TaskiqTask | None: ...
+    def find_task(
+        self, task_name: str
+    ) -> AsyncTaskiqDecoratedTask[Any, Any] | None: ...
 
 
 type TaskReference = TaskiqTask | str
