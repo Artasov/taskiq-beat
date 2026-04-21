@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from taskiq_beat import IntervalTrigger, PeriodicSchedule, SchedulerApp, SchedulerConfig
+from taskiq_beat import ImmediateDispatch, IntervalTrigger, PeriodicSchedule, SchedulerApp, SchedulerConfig
 from taskiq_beat.models import SchedulerJob, SchedulerRun
 
 
@@ -24,16 +24,16 @@ async def scheduler_app(session_factory, broker) -> SchedulerApp:
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_creates_periodic_job(db_session, scheduler_app: SchedulerApp) -> None:
+async def test_single_builder_creates_periodic_job(db_session, scheduler_app: SchedulerApp) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
-    scheduler = scheduler_app.create_scheduler(
+    job = await scheduler_app.single(
         task=task,
+        metadata={"scope": "tests"},
+    ).schedule(
+        db_session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=10)),
         name="Echo",
-        metadata={"scope": "tests"},
     )
-
-    job = await scheduler.schedule(db_session)
 
     assert job.task_name == "tests.echo"
     assert job.kind == "periodic"
@@ -43,37 +43,77 @@ async def test_scheduler_creates_periodic_job(db_session, scheduler_app: Schedul
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_rejects_unknown_task(db_session, scheduler_app: SchedulerApp) -> None:
-    scheduler = scheduler_app.create_scheduler(
-        task="tests.unknown",
-        trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=10)),
+async def test_single_builder_defaults_to_immediate_dispatch(db_session, scheduler_app: SchedulerApp) -> None:
+    task = scheduler_app.registry.get_task("tests.echo")
+    job = await scheduler_app.single(task=task).schedule(db_session, name="Immediate echo")
+
+    runs = list((await db_session.execute(select(SchedulerRun).where(SchedulerRun.job_id == job.id))).scalars())
+
+    assert job.task_name == "tests.echo"
+    assert job.kind == "one_off"
+    assert job.strategy == "immediate"
+    assert job.is_enabled is False
+    assert job.next_run_at is None
+    assert job.dispatch_count == 1
+    assert job.last_run_at is not None
+    assert job.last_dispatched_task_id is not None
+    assert len(runs) == 1
+    assert runs[0].status == "dispatched"
+    assert runs[0].broker_task_id == job.last_dispatched_task_id
+
+
+@pytest.mark.asyncio()
+async def test_single_builder_accepts_explicit_immediate_dispatch(db_session, scheduler_app: SchedulerApp) -> None:
+    task = scheduler_app.registry.get_task("tests.echo")
+    job = await scheduler_app.single(task=task).schedule(
+        db_session,
+        trigger=ImmediateDispatch(),
     )
 
+    assert job.strategy == "immediate"
+    assert job.dispatch_count == 1
+
+
+@pytest.mark.asyncio()
+async def test_single_builder_rejects_immediate_dispatch_upsert(db_session, scheduler_app: SchedulerApp) -> None:
+    task = scheduler_app.registry.get_task("tests.echo")
+    with pytest.raises(ValueError, match="ImmediateDispatch cannot be used with upsert"):
+        await scheduler_app.single(task=task).upsert(
+            db_session,
+            trigger=ImmediateDispatch(),
+            job_id="system.immediate",
+        )
+
+
+@pytest.mark.asyncio()
+async def test_single_builder_rejects_unknown_task(db_session, scheduler_app: SchedulerApp) -> None:
     with pytest.raises(ValueError, match="not registered"):
-        await scheduler.schedule(db_session)
+        await scheduler_app.single(task="tests.unknown").schedule(
+            db_session,
+            trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=10)),
+        )
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_rejects_non_json_payload(db_session, scheduler_app: SchedulerApp) -> None:
+async def test_single_builder_rejects_non_json_payload(db_session, scheduler_app: SchedulerApp) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
-    scheduler = scheduler_app.create_scheduler(
-        task=task,
-        trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=10)),
-        metadata={"bad": object()},
-    )
-
     with pytest.raises(TypeError):
-        await scheduler.schedule(db_session)
+        await scheduler_app.single(
+            task=task,
+            metadata={"bad": object()},
+        ).schedule(
+            db_session,
+            trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=10)),
+        )
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_pause_resume_run_now_and_delete(db_session, scheduler_app: SchedulerApp) -> None:
+async def test_single_builder_pause_resume_run_now_and_delete(db_session, scheduler_app: SchedulerApp) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
-    scheduler = scheduler_app.create_scheduler(
-        task=task,
+    job = await scheduler_app.single(task=task).schedule(
+        db_session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
     )
-    job = await scheduler.schedule(db_session)
     initial_next_run_at = job.next_run_at
 
     paused = await scheduler_app.pause(db_session, job.id)
@@ -96,27 +136,25 @@ async def test_scheduler_pause_resume_run_now_and_delete(db_session, scheduler_a
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_upsert_creates_and_updates_job_without_duplicates(
+async def test_single_builder_upsert_creates_and_updates_job_without_duplicates(
     db_session, scheduler_app: SchedulerApp
 ) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
-    scheduler = scheduler_app.create_scheduler(
-        job_id="system.echo",
-        task=task,
+    job = await scheduler_app.single(task=task).upsert(
+        db_session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.echo",
         name="System echo",
     )
-
-    job = await scheduler.upsert(db_session)
     initial_next_run_at = job.next_run_at
     assert job.id == "system.echo"
 
-    updated_job = await scheduler_app.create_scheduler(
-        job_id="system.echo",
-        task=task,
+    updated_job = await scheduler_app.single(task=task).upsert(
+        db_session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=2)),
+        job_id="system.echo",
         name="System echo updated",
-    ).upsert(db_session)
+    )
 
     jobs = list((await db_session.execute(select(SchedulerJob))).scalars())
 
@@ -129,66 +167,51 @@ async def test_scheduler_upsert_creates_and_updates_job_without_duplicates(
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_upsert_preserves_next_run_for_unchanged_job(db_session, scheduler_app: SchedulerApp) -> None:
+async def test_single_builder_upsert_preserves_next_run_for_unchanged_job(
+    db_session, scheduler_app: SchedulerApp
+) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
-    scheduler = scheduler_app.create_scheduler(
-        job_id="system.stable",
-        task=task,
+    job = await scheduler_app.single(task=task).upsert(
+        db_session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.stable",
     )
-
-    job = await scheduler.upsert(db_session)
     initial_next_run_at = job.next_run_at
 
-    updated_job = await scheduler.upsert(db_session)
+    updated_job = await scheduler_app.single(task=task).upsert(
+        db_session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.stable",
+    )
 
     assert updated_job.next_run_at == initial_next_run_at
 
 
 @pytest.mark.asyncio()
-async def test_scheduler_app_sync_schedules_upserts_multiple_jobs(db_session, scheduler_app: SchedulerApp) -> None:
+async def test_single_builder_supports_bulk_startup_sync(db_session, scheduler_app: SchedulerApp) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
-    jobs = await scheduler_app.sync_schedules(
+    await scheduler_app.single(task=task).upsert(
         db_session,
-        [
-            scheduler_app.create_scheduler(
-                job_id="system.echo.1",
-                task=task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-                name="Echo 1",
-            ),
-            scheduler_app.create_scheduler(
-                job_id="system.echo.2",
-                task=task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=2)),
-                name="Echo 2",
-            ),
-        ],
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.echo.1",
+        name="Echo 1",
     )
-
-    jobs_after_repeat = await scheduler_app.sync_schedules(
+    await scheduler_app.single(task=task).upsert(
         db_session,
-        [
-            scheduler_app.create_scheduler(
-                job_id="system.echo.1",
-                task=task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-                name="Echo 1",
-            ),
-            scheduler_app.create_scheduler(
-                job_id="system.echo.2",
-                task=task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=2)),
-                name="Echo 2 updated",
-            ),
-        ],
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=2)),
+        job_id="system.echo.2",
+        name="Echo 2",
+    )
+    await scheduler_app.single(task=task).upsert(
+        db_session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=2)),
+        job_id="system.echo.2",
+        name="Echo 2 updated",
     )
 
     stored_jobs = list((await db_session.execute(select(SchedulerJob).order_by(SchedulerJob.id.asc()))).scalars())
 
-    assert [job.id for job in jobs] == ["system.echo.1", "system.echo.2"]
-    assert [job.id for job in jobs_after_repeat] == ["system.echo.1", "system.echo.2"]
-    assert len(stored_jobs) == 2
+    assert [job.id for job in stored_jobs] == ["system.echo.1", "system.echo.2"]
     assert stored_jobs[1].name == "Echo 2 updated"
 
 
@@ -204,10 +227,10 @@ async def test_scheduler_app_start_and_stop(scheduler_app: SchedulerApp) -> None
 async def test_scheduler_app_logs_job_lifecycle(db_session, scheduler_app: SchedulerApp, log_capture) -> None:
     log_capture.set_level(logging.INFO, logger="taskiq_beat.app")
     task = scheduler_app.registry.get_task("tests.echo")
-    job = await scheduler_app.create_scheduler(
-        task=task,
+    job = await scheduler_app.single(task=task).schedule(
+        db_session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-    ).schedule(db_session)
+    )
 
     await scheduler_app.pause(db_session, job.id)
     await scheduler_app.resume(db_session, job.id)
@@ -280,10 +303,10 @@ async def test_scheduler_resume_handles_sqlite_like_naive_timestamps(
     scheduler_app: SchedulerApp,
 ) -> None:
     task = scheduler_app.registry.get_task("tests.echo")
-    job = await scheduler_app.create_scheduler(
-        task=task,
+    job = await scheduler_app.single(task=task).schedule(
+        db_session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-    ).schedule(db_session)
+    )
 
     job.created_at = job.created_at.replace(tzinfo=None)
     job.updated_at = job.updated_at.replace(tzinfo=None)

@@ -6,13 +6,19 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from taskiq_beat.builders import (
+    ChainScheduleBuilder,
+    SingleScheduleBuilder,
+    make_chain_builder,
+    make_single_builder,
+)
+from taskiq_beat.chains import ChainFailurePolicy, ChainStep, register_chain_orchestrator
 from taskiq_beat.config import SchedulerConfig
 from taskiq_beat.engine import SchedulerEngine, SchedulerHealthSnapshot
 from taskiq_beat.models import SchedulerJob
 from taskiq_beat.registry import TaskRegistry
 from taskiq_beat.repositories import JobRepository, RunRepository
 from taskiq_beat.scheduler import Scheduler
-from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
 from taskiq_beat.types import TaskiqBroker, TaskLoader, TaskReference
 
 log = logging.getLogger(__name__)
@@ -32,6 +38,7 @@ class SchedulerApp:
         self.broker = broker
         self.session_factory = session_factory
         self.config = config or SchedulerConfig()
+        register_chain_orchestrator(broker)
         self.registry = TaskRegistry(broker=broker, task_loader=task_loader)
         self.engine = SchedulerEngine(
             session_factory=session_factory,
@@ -39,71 +46,47 @@ class SchedulerApp:
             config=self.config,
         )
 
-    def create_scheduler(
+    def single(
             self,
             *,
             task: TaskReference,
-            trigger: PeriodicSchedule | OneOffSchedule,
-            job_id: str | None = None,
-            name: str | None = None,
-            description: str | None = None,
-            args: list[object] | None = None,
+            args: Sequence[object] | None = None,
             kwargs: dict[str, object] | None = None,
             metadata: dict[str, object] | None = None,
-            is_enabled: bool = True,
-    ) -> Scheduler:
-        """Build an in-memory scheduler definition bound to this app."""
-        return Scheduler(
-            task=task,
-            trigger=trigger,
-            job_id=job_id,
-            name=name,
-            description=description,
-            args=list(args or []),
-            kwargs=dict(kwargs or {}),
-            metadata=dict(metadata or {}),
-            is_enabled=is_enabled,
-            registry=self.registry,
-            engine=self.engine,
-        )
-
-    async def upsert_schedule(
+    ) -> SingleScheduleBuilder:
+        """Build a schedule definition for a single task."""
+        return make_single_builder(
             self,
-            session: AsyncSession,
-            *,
-            task: TaskReference,
-            trigger: PeriodicSchedule | OneOffSchedule,
-            job_id: str | None = None,
-            name: str | None = None,
-            description: str | None = None,
-            args: list[object] | None = None,
-            kwargs: dict[str, object] | None = None,
-            metadata: dict[str, object] | None = None,
-            is_enabled: bool = True,
-    ) -> SchedulerJob:
-        """Create or update a persisted schedule in a single call."""
-        scheduler = self.create_scheduler(
             task=task,
-            trigger=trigger,
-            job_id=job_id,
-            name=name,
-            description=description,
             args=args,
             kwargs=kwargs,
             metadata=metadata,
-            is_enabled=is_enabled,
         )
-        return await scheduler.upsert(session)
 
-    @staticmethod
-    async def sync_schedules(session: AsyncSession, schedulers: Sequence[Scheduler]) -> list[SchedulerJob]:
-        """Persist a batch of scheduler definitions sequentially."""
-        log.info("Syncing scheduler definitions.", extra={"scheduler_count": len(schedulers)})
-        jobs: list[SchedulerJob] = []
-        for scheduler in schedulers:
-            jobs.append(await scheduler.upsert(session))
-        log.info("Scheduler definitions synced.", extra={"job_count": len(jobs)})
-        return jobs
+    def chain(
+            self,
+            *,
+            steps: Sequence[ChainStep],
+            on_failure: ChainFailurePolicy = "stop",
+            max_chain_attempts: int = 1,
+            default_step_max_attempts: int = 1,
+            default_step_retry_delay_seconds: float = 0.0,
+            default_step_timeout_seconds: float | None = None,
+            wait_poll_interval_seconds: float = 0.5,
+            metadata: dict[str, object] | None = None,
+    ) -> ChainScheduleBuilder:
+        """Build a schedule definition for a sequential task chain."""
+        return make_chain_builder(
+            self,
+            steps=steps,
+            on_failure=on_failure,
+            max_chain_attempts=max_chain_attempts,
+            default_step_max_attempts=default_step_max_attempts,
+            default_step_retry_delay_seconds=default_step_retry_delay_seconds,
+            default_step_timeout_seconds=default_step_timeout_seconds,
+            wait_poll_interval_seconds=wait_poll_interval_seconds,
+            metadata=metadata,
+        )
 
     async def start(self) -> None:
         """Load tasks and start the background scheduler engine."""
@@ -149,10 +132,8 @@ class SchedulerApp:
         job.claimed_by = None
         job.claimed_at = None
         job.claim_expires_at = None
-        job.next_run_at = self.create_scheduler(
-            task=job.task_name,
-            trigger=trigger,
-        ).get_next_run_at(current_time, anchor=job.created_at)
+        scheduler = Scheduler(task=job.task_name, trigger=trigger, registry=self.registry, engine=self.engine)
+        job.next_run_at = scheduler.get_next_run_at(current_time, anchor=job.created_at)
         job.updated_at = current_time
         await session.commit()
         self.engine.upsert_job(job)

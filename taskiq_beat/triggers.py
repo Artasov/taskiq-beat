@@ -401,3 +401,15 @@ class OneOffSchedule:
     @classmethod
     def from_payload(cls, payload: dict) -> OneOffSchedule:
         return cls(run_at=datetime.fromisoformat(str(payload["run_at"])))
+
+
+@dataclass(slots=True, frozen=True)
+class ImmediateDispatch:
+    """Trigger marker: enqueue the task right now via broker.kiq(...)."""
+
+    def to_payload(self) -> dict[str, object]:
+        return {}
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> ImmediateDispatch:
+        return cls()

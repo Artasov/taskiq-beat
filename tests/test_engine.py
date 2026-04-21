@@ -51,10 +51,10 @@ async def test_engine_dispatches_one_off_job(monkeypatch, session_factory, sched
     monkeypatch.setattr(task, "kiq", fake_kiq)
 
     async with session_factory() as session:
-        job = await scheduler_app.create_scheduler(
-            task=task,
+        job = await scheduler_app.single(task=task).schedule(
+            session,
             trigger=OneOffSchedule(run_at=datetime.now(UTC) - timedelta(seconds=1)),
-        ).schedule(session)
+        )
 
     await scheduler_app.engine.run_once()
 
@@ -80,10 +80,10 @@ async def test_engine_retries_after_dispatch_error(monkeypatch, session_factory,
     monkeypatch.setattr(task, "kiq", fake_kiq)
 
     async with session_factory() as session:
-        job = await scheduler_app.create_scheduler(
-            task=task,
+        job = await scheduler_app.single(task=task).schedule(
+            session,
             trigger=OneOffSchedule(run_at=datetime.now(UTC) - timedelta(seconds=1)),
-        ).schedule(session)
+        )
 
     await scheduler_app.engine.run_once()
 
@@ -103,10 +103,10 @@ async def test_engine_restores_jobs_from_storage(session_factory, scheduler_app:
     task = scheduler_app.registry.get_task("tests.ping")
 
     async with session_factory() as session:
-        job = await scheduler_app.create_scheduler(
-            task=task,
+        job = await scheduler_app.single(task=task).schedule(
+            session,
             trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-        ).schedule(session)
+        )
 
     restored_app = SchedulerApp(
         broker=scheduler_app.broker,
@@ -126,10 +126,10 @@ async def test_engine_is_updated_immediately_when_new_job_is_scheduled(
     task = scheduler_app.registry.get_task("tests.ping")
 
     async with session_factory() as session:
-        job = await scheduler_app.create_scheduler(
-            task=task,
+        job = await scheduler_app.single(task=task).schedule(
+            session,
             trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-        ).schedule(session)
+        )
 
     assert str(job.id) in scheduler_app.engine.jobs
     assert any(item.job_id == str(job.id) for item in scheduler_app.engine.heap)
@@ -153,10 +153,10 @@ async def test_engine_dispatches_periodic_job_multiple_times(
     monkeypatch.setattr(task, "kiq", fake_kiq)
 
     async with session_factory() as session:
-        job = await scheduler_app.create_scheduler(
-            task=task,
+        job = await scheduler_app.single(task=task).schedule(
+            session,
             trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=1)),
-        ).schedule(session)
+        )
         job.next_run_at = datetime.now(UTC) - timedelta(seconds=1)
         job.updated_at = datetime.now(UTC)
         await session.commit()
@@ -192,10 +192,10 @@ async def test_engine_logs_dispatch_lifecycle(
     monkeypatch.setattr(task, "kiq", fake_kiq)
 
     async with session_factory() as session:
-        await scheduler_app.create_scheduler(
-            task=task,
+        await scheduler_app.single(task=task).schedule(
+            session,
             trigger=OneOffSchedule(run_at=datetime.now(UTC) - timedelta(seconds=1)),
-        ).schedule(session)
+        )
 
     await scheduler_app.engine.run_once()
 
@@ -238,10 +238,10 @@ async def test_engine_claims_job_once_across_multiple_schedulers(monkeypatch, se
     )
 
     async with session_factory() as session:
-        job = await scheduler_a.create_scheduler(
-            task=task,
+        job = await scheduler_a.single(task=task).schedule(
+            session,
             trigger=OneOffSchedule(run_at=datetime.now(UTC) - timedelta(seconds=1)),
-        ).schedule(session)
+        )
 
     await scheduler_a.engine.sync_all()
     await scheduler_b.engine.sync_all()
@@ -290,10 +290,10 @@ async def test_engine_keeps_claim_alive_during_slow_dispatch(monkeypatch, sessio
     )
 
     async with session_factory() as session:
-        job = await scheduler_a.create_scheduler(
-            task=task,
+        job = await scheduler_a.single(task=task).schedule(
+            session,
             trigger=OneOffSchedule(run_at=datetime.now(UTC) - timedelta(seconds=1)),
-        ).schedule(session)
+        )
 
     await scheduler_a.engine.sync_all()
     await scheduler_b.engine.sync_all()

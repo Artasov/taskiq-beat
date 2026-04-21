@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from taskiq_beat.triggers import CrontabTrigger, IntervalTrigger, OneOffSchedule, PeriodicSchedule
+from taskiq_beat.triggers import CrontabTrigger, ImmediateDispatch, IntervalTrigger, OneOffSchedule, PeriodicSchedule
 
 
 def test_interval_trigger_get_next_run_at() -> None:
@@ -76,6 +76,14 @@ def test_periodic_schedule_end_at_stops_next_run() -> None:
 def test_one_off_requires_timezone() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         OneOffSchedule(run_at=datetime.now())
+
+
+def test_immediate_dispatch_payload_roundtrip() -> None:
+    trigger = ImmediateDispatch()
+
+    restored = ImmediateDispatch.from_payload(trigger.to_payload())
+
+    assert restored == ImmediateDispatch()
 
 
 def test_crontab_invalid_step_raises() -> None:

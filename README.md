@@ -19,6 +19,7 @@
 - [How to run it](#how-to-run-it)
 - [Run with FastAPI](#run-with-fastapi)
 - [Create jobs](#create-jobs)
+- [Task chains](#task-chains)
 - [Upsert and startup sync](#upsert-and-startup-sync)
 - [Manage jobs](#manage-jobs)
 - [Logging](#logging)
@@ -46,6 +47,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from taskiq import InMemoryBroker
 
 from taskiq_beat import (
+    ImmediateDispatch,
     IntervalTrigger,
     PeriodicSchedule,
     SchedulerApp,
@@ -103,7 +105,7 @@ What a real application needs:
 
 1. Start a process with `scheduler_app.start()`.
 2. Start a Taskiq worker process that will consume tasks from the broker.
-3. Create jobs through `scheduler_app.create_scheduler(...).schedule(session)`.
+3. Create jobs through `scheduler_app.single(task=...).schedule(session)` or `scheduler_app.chain(steps=[...]).schedule(session)`.
 
 Important:
 
@@ -198,23 +200,59 @@ Both approaches are valid. The main rule is: do not run several scheduler proces
 
 ## Create jobs
 
+The public API has two builders on `SchedulerApp`:
+
+- `scheduler_app.single(task=...)` — schedule a single task.
+- `scheduler_app.chain(steps=[...])` — schedule an ordered chain of tasks.
+
+Both builders expose `.schedule(session, trigger=...)` and
+`.upsert(session, trigger=..., job_id=...)`.
+If `trigger` is omitted in `.schedule(...)`, taskiq-beat uses `ImmediateDispatch()`: the task is sent to the broker
+right away and the job/run records are stored in the database.
+
+```python
+from datetime import UTC, datetime, timedelta
+
+from taskiq_beat import ImmediateDispatch, IntervalTrigger, OneOffSchedule, PeriodicSchedule
+
+# Default: immediate task.kiq(...) + database record.
+await scheduler_app.single(task=heartbeat_task).schedule(session)
+
+# Equivalent explicit form.
+await scheduler_app.single(task=heartbeat_task).schedule(
+    session,
+    trigger=ImmediateDispatch(),
+)
+
+# Explicit delayed or periodic scheduling.
+await scheduler_app.single(task=heartbeat_task).schedule(
+    session,
+    trigger=OneOffSchedule(run_at=datetime.now(UTC) + timedelta(minutes=10)),
+)
+await scheduler_app.single(task=heartbeat_task).schedule(
+    session,
+    trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+)
+```
+
+`ImmediateDispatch` is only valid with `.schedule(...)`. Use a real schedule trigger with `.upsert(...)`.
+
 ### Interval job
 
 ```python
 from taskiq_beat import IntervalTrigger, PeriodicSchedule
 
 async with session_factory() as session:
-    scheduler = scheduler_app.create_scheduler(
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).schedule(
+        session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=5)),
         name="Heartbeat every 5 seconds",
     )
-    job = await scheduler.schedule(session)
 
 print(job.id)  # Example: "6c6342d8-6d74-4d16-8f7a-5d4f1b3a0b13"
 ```
 
-`await scheduler.schedule(session)` returns `SchedulerJob`.
+`.schedule(session, ...)` returns `SchedulerJob`.
 This is a SQLAlchemy model instance with fields such as:
 
 - `job.id`
@@ -226,16 +264,16 @@ This is a SQLAlchemy model instance with fields such as:
 
 Most of the time you use `job.id` later for pause, resume, run-now, and delete.
 
-If you want a stable identifier for a system job, pass `job_id` explicitly:
+If you want a stable identifier for a system job, use `.upsert(...)` with an explicit `job_id`:
 
 ```python
 async with session_factory() as session:
-    job = await scheduler_app.create_scheduler(
-        job_id="system.heartbeat",
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).upsert(
+        session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+        job_id="system.heartbeat",
         name="System heartbeat",
-    ).upsert(session)
+    )
 ```
 
 ### One-off job
@@ -246,12 +284,11 @@ from datetime import UTC, datetime, timedelta
 from taskiq_beat import OneOffSchedule
 
 async with session_factory() as session:
-    scheduler = scheduler_app.create_scheduler(
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).schedule(
+        session,
         trigger=OneOffSchedule(run_at=datetime.now(UTC) + timedelta(minutes=10)),
         name="Delayed heartbeat",
     )
-    job = await scheduler.schedule(session)
 ```
 
 ### Crontab job
@@ -260,33 +297,150 @@ async with session_factory() as session:
 from taskiq_beat import CrontabTrigger, PeriodicSchedule
 
 async with session_factory() as session:
-    scheduler = scheduler_app.create_scheduler(
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).schedule(
+        session,
         trigger=PeriodicSchedule(
             crontab=CrontabTrigger(second="0", minute="*/5", hour="*"),
         ),
         name="Every 5 minutes",
     )
-    job = await scheduler.schedule(session)
 ```
+
+### Passing args and kwargs to the task
+
+```python
+async with session_factory() as session:
+    await scheduler_app.single(
+        task=heartbeat_task,
+        args=[42],
+        kwargs={"label": "ping"},
+        metadata={"scope": "system"},
+    ).schedule(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=1)),
+    )
+```
+
+## Task chains
+
+Taskiq does not enforce ordered execution of multiple tasks out of the box.
+`taskiq-beat` adds a small built-in orchestrator that runs tasks one after another
+and persists the chain as a regular scheduler job.
+
+The orchestrator task is registered automatically inside every `SchedulerApp`
+under the name `taskiq_beat.chain_orchestrator`. When the schedule fires, the
+scheduler enqueues this orchestrator; the orchestrator then dispatches every
+step to the broker via `task.kiq(...)` and awaits the result before moving on
+to the next one.
+
+```python
+from datetime import UTC, datetime
+
+from taskiq_beat import ChainStep, IntervalTrigger, OneOffSchedule, PeriodicSchedule
+
+@broker.task(task_name="reports.collect")
+async def collect_report(year: int, month: int) -> dict:
+    ...
+
+
+@broker.task(task_name="reports.render")
+async def render_report(*, format: str) -> bytes:
+    ...
+
+
+@broker.task(task_name="reports.upload")
+async def upload_report() -> str:
+    ...
+
+
+async with session_factory() as session:
+    # Run once, immediately.
+    await scheduler_app.chain(
+        steps=[
+            ChainStep(task=collect_report, args=[2026, 4]),
+            ChainStep(task=render_report, kwargs={"format": "pdf"}, max_attempts=3, post_delay_ms=500),
+            ChainStep(task=upload_report, timeout_seconds=120.0),
+        ],
+        on_failure="stop",             # "stop" or "restart"
+        max_chain_attempts=2,          # how many times the whole chain may run
+        default_step_max_attempts=1,   # default per-step retry budget
+        default_step_retry_delay_seconds=0.0,
+        default_step_timeout_seconds=None,  # None = wait forever for result
+        wait_poll_interval_seconds=0.5,
+    ).upsert(
+        session,
+        trigger=OneOffSchedule(run_at=datetime.now(UTC)),
+        job_id="reports.monthly.one_off",
+        name="Monthly report chain",
+    )
+
+    # Or schedule it periodically like any other job.
+    await scheduler_app.chain(
+        steps=[
+            ChainStep(task=collect_report, args=[2026, 4]),
+            ChainStep(task=render_report, kwargs={"format": "pdf"}, max_attempts=3, post_delay_ms=500),
+            ChainStep(task=upload_report, timeout_seconds=120.0),
+        ],
+    ).upsert(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=6)),
+        job_id="reports.monthly",
+        name="Monthly report chain",
+    )
+```
+
+### Options
+
+- `ChainStep.task` — accepts the Taskiq task object itself (result of `@broker.task(...)`) or its string name if importing the task is inconvenient.
+- `ChainStep.args` / `ChainStep.kwargs` — must be JSON-serializable, same as for a regular schedule.
+- `ChainStep.max_attempts` — per-step retry budget. Overrides `default_step_max_attempts`.
+- `ChainStep.retry_delay_seconds` — delay between attempts of a single step.
+- `ChainStep.timeout_seconds` — maximum time to wait for a single step result; `None` waits forever.
+- `ChainStep.post_delay_ms` — delay in milliseconds after a successful step before the next step starts.
+- `chain(..., on_failure=...)` — `"stop"` aborts the chain and raises on the worker,
+  `"restart"` starts the chain over from the first step.
+- `chain(..., max_chain_attempts=...)` — upper bound on chain restarts; `1` disables restart.
+
+### Failure handling
+
+Per-step retries run inside the orchestrator, so intermittent errors are absorbed
+transparently. If a step exhausts its attempts:
+
+- with `on_failure="stop"` the orchestrator raises `ChainAbortedError`, which the
+  worker logs as a failed task.
+- with `on_failure="restart"` the chain re-runs from the first step until
+  `max_chain_attempts` is reached, then raises `ChainAbortedError`.
+
+Scheduler-level retries (`dispatch_retry_seconds`) still apply to the
+orchestrator itself when `task.kiq(...)` cannot be delivered to the broker.
+
+### Requirements
+
+`task.wait_result(...)` is used to wait for each step, so the broker must have
+a result backend configured. `InMemoryBroker` has one built in; for production
+brokers attach a result backend such as Redis or database-based implementations
+from the Taskiq ecosystem.
+
+Because the orchestrator runs as a regular worker task, it occupies a worker
+slot for the full duration of the chain. Size your worker pool accordingly.
 
 ## Upsert and startup sync
 
 For system schedules you usually do not want duplicate rows after every restart.
 
-Use a stable `job_id` and call `upsert(...)`:
+Use a stable `job_id` and call `.upsert(...)`:
 
 ```python
 async with session_factory() as session:
-    await scheduler_app.create_scheduler(
-        job_id="system.cleanup",
-        task=heartbeat_task,
+    await scheduler_app.single(task=heartbeat_task).upsert(
+        session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.cleanup",
         name="Cleanup",
-    ).upsert(session)
+    )
 ```
 
-`upsert(...)` behavior:
+`.upsert(...)` behavior:
 
 - creates a new row if the job does not exist yet
 - updates the existing row if `job_id` already exists
@@ -294,26 +448,27 @@ async with session_factory() as session:
 - preserves `next_run_at` if the schedule did not change
 - recalculates `next_run_at` if trigger or enabled state changed
 
-You can also sync several schedules at startup:
+For several schedules at startup, just upsert them in a row:
 
 ```python
 async with session_factory() as session:
-    await scheduler_app.sync_schedules(
+    await scheduler_app.single(task=heartbeat_task).upsert(
         session,
-        [
-            scheduler_app.create_scheduler(
-                job_id="system.cleanup",
-                task=heartbeat_task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-                name="Cleanup",
-            ),
-            scheduler_app.create_scheduler(
-                job_id="system.metrics",
-                task=heartbeat_task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
-                name="Metrics",
-            ),
-        ],
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.cleanup",
+        name="Cleanup",
+    )
+    await scheduler_app.single(task=heartbeat_task).upsert(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+        job_id="system.metrics",
+        name="Metrics",
+    )
+    await scheduler_app.chain(steps=[...]).upsert(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=6)),
+        job_id="system.reports",
+        name="Reports chain",
     )
 ```
 
@@ -324,7 +479,7 @@ This is the recommended way to register built-in application schedules during st
 What you need:
 
 - `session_factory()` to open an `AsyncSession`
-- `job.id`, which is usually taken from the result of `await scheduler.schedule(session)`
+- `job.id`, which is usually taken from the result of `await scheduler_app.single(task=...).schedule(session, trigger=...)`
 
 ```python
 async with session_factory() as session:

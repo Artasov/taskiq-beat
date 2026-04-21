@@ -13,8 +13,8 @@ from taskiq_beat.datetime_utils import normalize_utc
 from taskiq_beat.models import SchedulerJob, SchedulerRun
 from taskiq_beat.registry import TaskRegistry
 from taskiq_beat.repositories import JobRepository, RunRepository
-from taskiq_beat.scheduler import Scheduler
-from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
+from taskiq_beat.scheduler import Scheduler, SchedulerTrigger
+from taskiq_beat.triggers import PeriodicSchedule
 from taskiq_beat.types import TaskiqTask
 
 log = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class PreparedDispatch:
     job_id: str
     task_name: str
     task: TaskiqTask
-    trigger: PeriodicSchedule | OneOffSchedule
+    trigger: SchedulerTrigger
     args: list[object]
     kwargs: dict[str, object]
     scheduled_for: datetime

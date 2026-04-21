@@ -19,6 +19,7 @@
 - [Как это запускать](#как-это-запускать)
 - [Запуск с FastAPI](#запуск-с-fastapi)
 - [Создание job](#создание-job)
+- [Цепочки задач](#цепочки-задач)
 - [Upsert и стартовый sync](#upsert-и-стартовый-sync)
 - [Управление job](#управление-job)
 - [Логирование](#логирование)
@@ -46,6 +47,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from taskiq import InMemoryBroker
 
 from taskiq_beat import (
+    ImmediateDispatch,
     IntervalTrigger,
     PeriodicSchedule,
     SchedulerApp,
@@ -103,7 +105,7 @@ scheduler_app = SchedulerApp(
 
 1. Поднять process с `scheduler_app.start()`.
 2. Поднять Taskiq worker process, который будет забирать задачи из broker.
-3. Создавать job через `scheduler_app.create_scheduler(...).schedule(session)`.
+3. Создавать job через `scheduler_app.single(task=...).schedule(session)` или `scheduler_app.chain(steps=[...]).schedule(session)`.
 
 Важно:
 
@@ -199,23 +201,59 @@ app = FastAPI(lifespan=lifespan)
 
 ## Создание job
 
+Публичный API `SchedulerApp` построен на двух builder-ах:
+
+- `scheduler_app.single(task=...)` — запланировать одну задачу.
+- `scheduler_app.chain(steps=[...])` — запланировать упорядоченную цепочку задач.
+
+У обоих есть `.schedule(session, trigger=...)` и
+`.upsert(session, trigger=..., job_id=...)`.
+Если в `.schedule(...)` не передать `trigger`, taskiq-beat использует `ImmediateDispatch()`: задача сразу уходит в
+broker, а записи job/run сохраняются в базе.
+
+```python
+from datetime import UTC, datetime, timedelta
+
+from taskiq_beat import ImmediateDispatch, IntervalTrigger, OneOffSchedule, PeriodicSchedule
+
+# По умолчанию: сразу task.kiq(...) + запись в БД.
+await scheduler_app.single(task=heartbeat_task).schedule(session)
+
+# То же самое, но явно.
+await scheduler_app.single(task=heartbeat_task).schedule(
+    session,
+    trigger=ImmediateDispatch(),
+)
+
+# Явные варианты отложенного или периодического запуска.
+await scheduler_app.single(task=heartbeat_task).schedule(
+    session,
+    trigger=OneOffSchedule(run_at=datetime.now(UTC) + timedelta(minutes=10)),
+)
+await scheduler_app.single(task=heartbeat_task).schedule(
+    session,
+    trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+)
+```
+
+`ImmediateDispatch` работает только с `.schedule(...)`. Для `.upsert(...)` используй настоящий schedule trigger.
+
 ### Interval job
 
 ```python
 from taskiq_beat import IntervalTrigger, PeriodicSchedule
 
 async with session_factory() as session:
-    scheduler = scheduler_app.create_scheduler(
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).schedule(
+        session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(seconds=5)),
         name="Heartbeat every 5 seconds",
     )
-    job = await scheduler.schedule(session)
 
 print(job.id)  # Например: "6c6342d8-6d74-4d16-8f7a-5d4f1b3a0b13"
 ```
 
-`await scheduler.schedule(session)` возвращает `SchedulerJob`.
+`.schedule(session, ...)` возвращает `SchedulerJob`.
 Это SQLAlchemy model instance с полями вроде:
 
 - `job.id`
@@ -227,16 +265,16 @@ print(job.id)  # Например: "6c6342d8-6d74-4d16-8f7a-5d4f1b3a0b13"
 
 Чаще всего дальше используется именно `job.id` для pause, resume, run-now и delete.
 
-Если нужен стабильный идентификатор для системной job, передай `job_id` явно:
+Если нужен стабильный идентификатор для системной job, используй `.upsert(...)` с явным `job_id`:
 
 ```python
 async with session_factory() as session:
-    job = await scheduler_app.create_scheduler(
-        job_id="system.heartbeat",
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).upsert(
+        session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+        job_id="system.heartbeat",
         name="System heartbeat",
-    ).upsert(session)
+    )
 ```
 
 ### One-off job
@@ -247,12 +285,11 @@ from datetime import UTC, datetime, timedelta
 from taskiq_beat import OneOffSchedule
 
 async with session_factory() as session:
-    scheduler = scheduler_app.create_scheduler(
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).schedule(
+        session,
         trigger=OneOffSchedule(run_at=datetime.now(UTC) + timedelta(minutes=10)),
         name="Delayed heartbeat",
     )
-    job = await scheduler.schedule(session)
 ```
 
 ### Crontab job
@@ -261,33 +298,148 @@ async with session_factory() as session:
 from taskiq_beat import CrontabTrigger, PeriodicSchedule
 
 async with session_factory() as session:
-    scheduler = scheduler_app.create_scheduler(
-        task=heartbeat_task,
+    job = await scheduler_app.single(task=heartbeat_task).schedule(
+        session,
         trigger=PeriodicSchedule(
             crontab=CrontabTrigger(second="0", minute="*/5", hour="*"),
         ),
         name="Every 5 minutes",
     )
-    job = await scheduler.schedule(session)
 ```
+
+### Передача args и kwargs в задачу
+
+```python
+async with session_factory() as session:
+    await scheduler_app.single(
+        task=heartbeat_task,
+        args=[42],
+        kwargs={"label": "ping"},
+        metadata={"scope": "system"},
+    ).schedule(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=1)),
+    )
+```
+
+## Цепочки задач
+
+Сам Taskiq не гарантирует упорядоченный запуск нескольких задач друг за другом.
+`taskiq-beat` добавляет встроенный orchestrator, который выполняет задачи по
+очереди и хранится как обычный scheduler job.
+
+Orchestrator автоматически регистрируется в `SchedulerApp` под именем
+`taskiq_beat.chain_orchestrator`. Когда срабатывает расписание, scheduler
+enqueue'ит orchestrator, а уже orchestrator поочерёдно вызывает каждый шаг через
+`task.kiq(...)` и ждёт его результат перед переходом к следующему шагу.
+
+```python
+from datetime import UTC, datetime
+
+from taskiq_beat import ChainStep, IntervalTrigger, OneOffSchedule, PeriodicSchedule
+
+@broker.task(task_name="reports.collect")
+async def collect_report(year: int, month: int) -> dict:
+    ...
+
+
+@broker.task(task_name="reports.render")
+async def render_report(*, format: str) -> bytes:
+    ...
+
+
+@broker.task(task_name="reports.upload")
+async def upload_report() -> str:
+    ...
+
+
+async with session_factory() as session:
+    # Однократный запуск прямо сейчас.
+    await scheduler_app.chain(
+        steps=[
+            ChainStep(task=collect_report, args=[2026, 4]),
+            ChainStep(task=render_report, kwargs={"format": "pdf"}, max_attempts=3, post_delay_ms=500),
+            ChainStep(task=upload_report, timeout_seconds=120.0),
+        ],
+        on_failure="stop",             # "stop" или "restart"
+        max_chain_attempts=2,          # сколько раз можно перезапускать всю цепочку
+        default_step_max_attempts=1,   # дефолтный бюджет ретраев на шаг
+        default_step_retry_delay_seconds=0.0,
+        default_step_timeout_seconds=None,  # None = ждать результат сколько угодно
+        wait_poll_interval_seconds=0.5,
+    ).upsert(
+        session,
+        trigger=OneOffSchedule(run_at=datetime.now(UTC)),
+        job_id="reports.monthly.one_off",
+        name="Monthly report chain",
+    )
+
+    # Либо периодически, как любой другой job.
+    await scheduler_app.chain(
+        steps=[
+            ChainStep(task=collect_report, args=[2026, 4]),
+            ChainStep(task=render_report, kwargs={"format": "pdf"}, max_attempts=3, post_delay_ms=500),
+            ChainStep(task=upload_report, timeout_seconds=120.0),
+        ],
+    ).upsert(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=6)),
+        job_id="reports.monthly",
+        name="Monthly report chain",
+    )
+```
+
+### Параметры
+
+- `ChainStep.task` — принимает саму Taskiq-задачу (результат `@broker.task(...)`) либо её строковое имя, если импортировать задачу неудобно.
+- `ChainStep.args` / `ChainStep.kwargs` — должны быть JSON-сериализуемыми, как и для обычного расписания.
+- `ChainStep.max_attempts` — бюджет ретраев для конкретного шага. Перекрывает `default_step_max_attempts`.
+- `ChainStep.retry_delay_seconds` — задержка между попытками одного шага.
+- `ChainStep.timeout_seconds` — максимальное время ожидания результата шага; `None` — без лимита.
+- `ChainStep.post_delay_ms` — задержка в миллисекундах после успешного шага перед запуском следующего.
+- `chain(..., on_failure=...)` — `"stop"` останавливает цепочку и бросает исключение на worker,
+  `"restart"` запускает цепочку заново с первого шага.
+- `chain(..., max_chain_attempts=...)` — максимум перезапусков цепочки; `1` отключает перезапуск.
+
+### Обработка сбоев
+
+Ретраи на уровне шага происходят внутри orchestrator, поэтому временные ошибки
+поглощаются прозрачно. Если шаг исчерпал свои попытки:
+
+- при `on_failure="stop"` orchestrator бросает `ChainAbortedError`, и worker
+  логирует таск как упавший.
+- при `on_failure="restart"` цепочка запускается с первого шага, пока не будет
+  достигнут `max_chain_attempts`, затем также бросается `ChainAbortedError`.
+
+Scheduler-уровневые ретраи (`dispatch_retry_seconds`) по-прежнему работают для
+самого orchestrator, если `task.kiq(...)` не удалось отправить в broker.
+
+### Требования
+
+Для ожидания каждого шага используется `task.wait_result(...)`, поэтому у broker
+должен быть настроен result backend. У `InMemoryBroker` он встроенный; для
+продакшен-брокеров нужно подключить backend (Redis и другие) из экосистемы Taskiq.
+
+Orchestrator выполняется как обычный worker task и занимает слот worker на всё
+время работы цепочки. Учитывайте это при выборе размера worker pool.
 
 ## Upsert и стартовый sync
 
 Для системных расписаний обычно не нужны дубли строк после каждого рестарта.
 
-Используй стабильный `job_id` и вызывай `upsert(...)`:
+Используй стабильный `job_id` и вызывай `.upsert(...)`:
 
 ```python
 async with session_factory() as session:
-    await scheduler_app.create_scheduler(
-        job_id="system.cleanup",
-        task=heartbeat_task,
+    await scheduler_app.single(task=heartbeat_task).upsert(
+        session,
         trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.cleanup",
         name="Cleanup",
-    ).upsert(session)
+    )
 ```
 
-Что делает `upsert(...)`:
+Что делает `.upsert(...)`:
 
 - создаёт новую строку, если job ещё нет
 - обновляет существующую строку, если `job_id` уже есть
@@ -295,26 +447,27 @@ async with session_factory() as session:
 - сохраняет `next_run_at`, если расписание не менялось
 - пересчитывает `next_run_at`, если изменился trigger или enabled state
 
-Также можно синкать несколько расписаний на старте:
+Для нескольких расписаний на старте просто вызывай `.upsert(...)` подряд:
 
 ```python
 async with session_factory() as session:
-    await scheduler_app.sync_schedules(
+    await scheduler_app.single(task=heartbeat_task).upsert(
         session,
-        [
-            scheduler_app.create_scheduler(
-                job_id="system.cleanup",
-                task=heartbeat_task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
-                name="Cleanup",
-            ),
-            scheduler_app.create_scheduler(
-                job_id="system.metrics",
-                task=heartbeat_task,
-                trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
-                name="Metrics",
-            ),
-        ],
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=1)),
+        job_id="system.cleanup",
+        name="Cleanup",
+    )
+    await scheduler_app.single(task=heartbeat_task).upsert(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(minutes=5)),
+        job_id="system.metrics",
+        name="Metrics",
+    )
+    await scheduler_app.chain(steps=[...]).upsert(
+        session,
+        trigger=PeriodicSchedule(interval=IntervalTrigger(hours=6)),
+        job_id="system.reports",
+        name="Reports chain",
     )
 ```
 
@@ -325,7 +478,7 @@ async with session_factory() as session:
 Что нужно:
 
 - `session_factory()`, чтобы открыть `AsyncSession`
-- `job.id`, который обычно берётся из результата `await scheduler.schedule(session)`
+- `job.id`, который обычно берётся из результата `await scheduler_app.single(task=...).schedule(session, trigger=...)`
 
 ```python
 async with session_factory() as session:

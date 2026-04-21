@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from taskiq_beat.datetime_utils import normalize_utc
-from taskiq_beat.models import SchedulerJob
+from taskiq_beat.models import SchedulerJob, SchedulerRun
 from taskiq_beat.registry import TaskRegistry
 from taskiq_beat.repositories import JobRepository
-from taskiq_beat.triggers import OneOffSchedule, PeriodicSchedule
+from taskiq_beat.triggers import ImmediateDispatch, OneOffSchedule, PeriodicSchedule
 from taskiq_beat.types import TaskReference
 
 if TYPE_CHECKING:
@@ -19,13 +19,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+SchedulerTrigger = PeriodicSchedule | OneOffSchedule | ImmediateDispatch
+
 
 @dataclass(slots=True)
 class Scheduler:
     """Declarative description of a single persisted scheduler job."""
 
     task: TaskReference
-    trigger: PeriodicSchedule | OneOffSchedule
+    trigger: SchedulerTrigger
     job_id: str | None = None
     name: str | None = None
     description: str | None = None
@@ -40,13 +42,20 @@ class Scheduler:
         """Create a new job row from this scheduler definition."""
         job = self.build_new_job()
         await JobRepository.create(session, job)
+        dispatch_error: Exception | None = None
+        if isinstance(self.trigger, ImmediateDispatch):
+            dispatch_error = await self.dispatch_immediate(session, job)
         await session.commit()
         self.notify_engine(job)
         log.info("Scheduler job created.", extra={"job_id": str(job.id), "task_name": job.task_name, "kind": job.kind})
+        if dispatch_error is not None:
+            raise dispatch_error
         return job
 
     async def upsert(self, session: AsyncSession) -> SchedulerJob:
         """Insert a new job or update an existing one in place."""
+        if isinstance(self.trigger, ImmediateDispatch):
+            raise ValueError("ImmediateDispatch cannot be used with upsert; use schedule() instead.")
         if self.job_id is None:
             return await self.schedule(session)
         existing_job = await JobRepository.get_by_id(session, self.job_id)
@@ -66,12 +75,65 @@ class Scheduler:
         )
         return job
 
+    async def dispatch_immediate(self, session: AsyncSession, job: SchedulerJob) -> Exception | None:
+        """Enqueue the job's task via broker.kiq and persist a run record."""
+        task = self.get_registry().get_task(job.task_name)
+        dispatched_at = datetime.now(UTC)
+        broker_task_id: str | None = None
+        error: Exception | None = None
+        try:
+            broker_task = await task.kiq(*job.task_args, **job.task_kwargs)
+            broker_task_id = getattr(broker_task, "task_id", None)
+        except Exception as exc:
+            error = exc
+            log.exception(
+                "Immediate dispatch failed.",
+                extra={"job_id": str(job.id), "task_name": job.task_name},
+            )
+        finished_at = datetime.now(UTC)
+        job.last_run_at = dispatched_at
+        job.last_dispatched_task_id = broker_task_id
+        job.dispatch_count += 1
+        job.updated_at = finished_at
+        if error is None:
+            job.last_error = None
+        else:
+            job.last_error = str(error)
+        if self.should_record_runs():
+            session.add(
+                SchedulerRun(
+                    job_id=job.id,
+                    status="failed" if error is not None else "dispatched",
+                    scheduled_for=dispatched_at,
+                    dispatched_at=dispatched_at,
+                    finished_at=finished_at,
+                    broker_task_id=broker_task_id,
+                    error=str(error) if error is not None else None,
+                    created_at=finished_at,
+                    updated_at=finished_at,
+                ),
+            )
+        if error is None:
+            log.info(
+                "Immediate dispatch succeeded.",
+                extra={"job_id": str(job.id), "task_name": job.task_name, "broker_task_id": broker_task_id},
+            )
+        return error
+
+    def should_record_runs(self) -> bool:
+        """Return True when the bound engine is configured to write run history."""
+        if self.engine is None:
+            return True
+        return self.engine.config.record_runs
+
     def build_new_job(self) -> SchedulerJob:
         """Materialize a fresh database model from the scheduler definition."""
         task_name = self.get_registry().validate_task(self.task)
         TaskRegistry.validate_payload(self.args, self.kwargs, self.metadata)
         created_at = datetime.now(UTC)
-        next_run_at = self.get_next_run_at(created_at)
+        is_immediate = isinstance(self.trigger, ImmediateDispatch)
+        is_enabled = False if is_immediate else self.is_enabled
+        next_run_at = None if is_immediate else self.get_next_run_at(created_at)
         job_kwargs: dict[str, object] = {}
         if self.job_id is not None:
             job_kwargs["id"] = self.job_id
@@ -85,8 +147,8 @@ class Scheduler:
             task_args=list(self.args),
             task_kwargs=dict(self.kwargs),
             metadata_payload=dict(self.metadata),
-            is_enabled=self.is_enabled,
-            next_run_at=next_run_at if self.is_enabled else None,
+            is_enabled=is_enabled,
+            next_run_at=next_run_at if is_enabled else None,
             created_at=created_at,
             updated_at=created_at,
             **job_kwargs,
@@ -153,23 +215,33 @@ class Scheduler:
         return self.registry
 
     def get_kind(self) -> str:
-        return "one_off" if isinstance(self.trigger, OneOffSchedule) else "periodic"
+        if isinstance(self.trigger, OneOffSchedule | ImmediateDispatch):
+            return "one_off"
+        return "periodic"
 
     def get_strategy(self) -> str:
-        return "one_off" if isinstance(self.trigger, OneOffSchedule) else self.trigger.strategy
+        if isinstance(self.trigger, ImmediateDispatch):
+            return "immediate"
+        if isinstance(self.trigger, OneOffSchedule):
+            return "one_off"
+        return self.trigger.strategy
 
     def get_next_run_at(self, current_time: datetime, *, anchor: datetime | None = None) -> datetime | None:
         """Compute the next fire time for the current trigger."""
         normalized_current_time = normalize_utc(current_time)
         normalized_anchor = normalize_utc(anchor) if anchor is not None else normalized_current_time
+        if isinstance(self.trigger, ImmediateDispatch):
+            return None
         if isinstance(self.trigger, OneOffSchedule):
             run_at = normalize_utc(self.trigger.run_at)
             return run_at if run_at > normalized_current_time else normalized_current_time
         return self.trigger.get_next_run_at(normalized_current_time, anchor=normalized_anchor)
 
     @classmethod
-    def build_trigger(cls, job: SchedulerJob) -> PeriodicSchedule | OneOffSchedule:
+    def build_trigger(cls, job: SchedulerJob) -> SchedulerTrigger:
         """Recreate the trigger object stored in the job payload."""
+        if job.strategy == "immediate":
+            return ImmediateDispatch.from_payload(job.trigger_payload)
         if job.kind == "one_off":
             return OneOffSchedule.from_payload(job.trigger_payload)
         return PeriodicSchedule.from_payload(job.trigger_payload)
