@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -22,7 +22,11 @@ class SchedulerJob(SchedulerBase):
         Index("ix_scheduler_job_claim_owner", "claimed_by", "claim_expires_at"),
     )
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False, native_uuid=True),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
     name: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
     task_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -54,8 +58,17 @@ class SchedulerRun(SchedulerBase):
         Index("ix_scheduler_run_status_finished", "status", "finished_at"),
     )
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    job_id: Mapped[str] = mapped_column(ForeignKey("scheduler_job.id", ondelete="CASCADE"), nullable=False, index=True)
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False, native_uuid=True),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    job_id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False, native_uuid=True),
+        ForeignKey("scheduler_job.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
