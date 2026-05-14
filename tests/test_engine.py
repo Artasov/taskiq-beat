@@ -360,3 +360,109 @@ async def test_engine_cleans_old_runs_when_retention_is_enabled(session_factory,
 
     assert runs == []
     assert scheduler_app.engine.cleaned_run_count == 1
+
+
+@pytest.mark.asyncio()
+async def test_engine_cleans_old_completed_one_off_jobs_when_retention_is_enabled(session_factory, broker) -> None:
+    @broker.task(task_name="tests.cleanup_jobs")
+    async def cleanup_jobs_task() -> None:
+        return None
+
+    scheduler_app = SchedulerApp(
+        broker=broker,
+        session_factory=session_factory,
+        config=SchedulerConfig(completed_job_retention_days=0, job_cleanup_interval_seconds=1),
+    )
+    current_time = datetime.now(UTC)
+    old_time = current_time - timedelta(days=1)
+
+    async with session_factory() as session:
+        deleted_job = SchedulerJob(
+            id="old-completed-one-off",
+            task_name="tests.cleanup_jobs",
+            kind="one_off",
+            strategy="one_off",
+            trigger_payload={"run_at": old_time.isoformat()},
+            task_args=[],
+            task_kwargs={},
+            metadata_payload={},
+            is_enabled=False,
+            next_run_at=None,
+            last_run_at=old_time,
+            dispatch_count=1,
+            created_at=old_time,
+            updated_at=old_time,
+        )
+        paused_job = SchedulerJob(
+            id="old-paused-one-off",
+            task_name="tests.cleanup_jobs",
+            kind="one_off",
+            strategy="one_off",
+            trigger_payload={"run_at": old_time.isoformat()},
+            task_args=[],
+            task_kwargs={},
+            metadata_payload={},
+            is_enabled=False,
+            next_run_at=None,
+            dispatch_count=0,
+            created_at=old_time,
+            updated_at=old_time,
+        )
+        active_job = SchedulerJob(
+            id="old-active-one-off",
+            task_name="tests.cleanup_jobs",
+            kind="one_off",
+            strategy="one_off",
+            trigger_payload={"run_at": old_time.isoformat()},
+            task_args=[],
+            task_kwargs={},
+            metadata_payload={},
+            is_enabled=True,
+            next_run_at=current_time,
+            dispatch_count=0,
+            created_at=old_time,
+            updated_at=old_time,
+        )
+        periodic_job = SchedulerJob(
+            id="old-disabled-periodic",
+            task_name="tests.cleanup_jobs",
+            kind="periodic",
+            strategy="interval",
+            trigger_payload={"strategy": "interval", "interval": {"seconds": 60}},
+            task_args=[],
+            task_kwargs={},
+            metadata_payload={},
+            is_enabled=False,
+            next_run_at=None,
+            last_run_at=old_time,
+            dispatch_count=1,
+            created_at=old_time,
+            updated_at=old_time,
+        )
+        session.add_all([deleted_job, paused_job, active_job, periodic_job])
+        await session.flush()
+        session.add(
+            SchedulerRun(
+                job_id=deleted_job.id,
+                status="dispatched",
+                scheduled_for=old_time,
+                dispatched_at=old_time,
+                finished_at=old_time,
+                broker_task_id="cleanup-job-task-1",
+                created_at=old_time,
+                updated_at=old_time,
+            )
+        )
+        await session.commit()
+        scheduler_app.engine.upsert_job(deleted_job)
+
+    await scheduler_app.engine.cleanup_jobs()
+
+    async with session_factory() as session:
+        jobs = list((await session.execute(select(SchedulerJob).order_by(SchedulerJob.id.asc()))).scalars())
+        runs = list((await session.execute(select(SchedulerRun))).scalars())
+
+    assert [job.id for job in jobs] == ["old-active-one-off", "old-disabled-periodic", "old-paused-one-off"]
+    assert deleted_job.id not in scheduler_app.engine.jobs
+    assert runs == []
+    assert scheduler_app.engine.cleaned_job_count == 1

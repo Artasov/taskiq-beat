@@ -88,6 +88,14 @@ scheduler_app = SchedulerApp(
         dispatch_batch_size=256,
         # Whether to write history rows into SchedulerRun.
         record_runs=True,
+        # How many days to keep SchedulerRun history. None disables automatic cleanup.
+        run_history_retention_days=None,
+        # How often old SchedulerRun rows are deleted when retention is configured.
+        run_cleanup_interval_seconds=3600.0,
+        # How many days to keep completed one-off/immediate SchedulerJob rows. None disables automatic cleanup.
+        completed_job_retention_days=None,
+        # How often completed one-off/immediate SchedulerJob rows are deleted when retention is configured.
+        job_cleanup_interval_seconds=3600.0,
         # Base timezone for helper APIs if another timezone is not specified explicitly.
         default_timezone="UTC",
     ),

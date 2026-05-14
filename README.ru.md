@@ -88,6 +88,14 @@ scheduler_app = SchedulerApp(
         dispatch_batch_size=256,
         # Нужно ли писать строки истории в SchedulerRun.
         record_runs=True,
+        # Сколько дней хранить историю SchedulerRun. None отключает автоматическую очистку.
+        run_history_retention_days=None,
+        # Как часто удалять старые строки SchedulerRun, если retention настроен.
+        run_cleanup_interval_seconds=3600.0,
+        # Сколько дней хранить завершённые one-off/immediate SchedulerJob. None отключает очистку.
+        completed_job_retention_days=None,
+        # Как часто удалять завершённые one-off/immediate SchedulerJob, если retention настроен.
+        job_cleanup_interval_seconds=3600.0,
         # Базовая timezone для helper API, если явно не указана другая.
         default_timezone="UTC",
     ),

@@ -111,10 +111,12 @@ class SchedulerHealthSnapshot:
     failed_dispatch_count: int
     claim_conflict_count: int
     cleaned_run_count: int
+    cleaned_job_count: int
     last_sync_at: datetime | None
     last_dispatch_started_at: datetime | None
     last_dispatch_finished_at: datetime | None
     last_cleanup_at: datetime | None
+    last_job_cleanup_at: datetime | None
 
 
 class SchedulerEngine:
@@ -137,12 +139,14 @@ class SchedulerEngine:
         self.last_dispatch_started_at: datetime | None = None
         self.last_dispatch_finished_at: datetime | None = None
         self.last_cleanup_at: datetime | None = None
+        self.last_job_cleanup_at: datetime | None = None
         self.sync_count = 0
         self.claimed_job_count = 0
         self.dispatched_job_count = 0
         self.failed_dispatch_count = 0
         self.claim_conflict_count = 0
         self.cleaned_run_count = 0
+        self.cleaned_job_count = 0
         self.stop_event = asyncio.Event()
         self.wakeup_event = asyncio.Event()
         self.runner_task: asyncio.Task[None] | None = None
@@ -180,6 +184,7 @@ class SchedulerEngine:
         await self.sync_storage()
         await self.dispatch_due_jobs()
         await self.cleanup_runs()
+        await self.cleanup_jobs()
 
     async def wait_next_tick(self) -> None:
         """Sleep until the next wakeup signal or the computed timeout."""
@@ -583,6 +588,30 @@ class SchedulerEngine:
                 extra={"deleted_run_count": deleted_runs, "finished_before": cutoff.isoformat()},
             )
 
+    async def cleanup_jobs(self) -> None:
+        """Periodically purge old completed one-off jobs when retention is configured."""
+        retention_days = self.config.completed_job_retention_days
+        if retention_days is None:
+            return
+        current_time = datetime.now(UTC)
+        if self.last_job_cleanup_at is not None:
+            elapsed = (current_time - self.last_job_cleanup_at).total_seconds()
+            if elapsed < self.config.job_cleanup_interval_seconds:
+                return
+        cutoff = current_time - timedelta(days=retention_days)
+        async with self.session_factory() as session:
+            deleted_jobs, deleted_job_ids = await JobRepository.purge_completed_one_off_before(session, cutoff)
+            await session.commit()
+        for job_id in deleted_job_ids:
+            self.jobs.pop(job_id, None)
+        self.last_job_cleanup_at = current_time
+        self.cleaned_job_count += deleted_jobs
+        if deleted_jobs:
+            log.info(
+                "Scheduler engine cleaned old completed jobs.",
+                extra={"deleted_job_count": deleted_jobs, "updated_before": cutoff.isoformat()},
+            )
+
     def get_health_snapshot(self) -> SchedulerHealthSnapshot:
         """Return a point-in-time summary of engine state."""
         active_job_count = sum(1 for job in self.jobs.values() if job.is_enabled and job.next_run_at is not None)
@@ -597,8 +626,10 @@ class SchedulerEngine:
             failed_dispatch_count=self.failed_dispatch_count,
             claim_conflict_count=self.claim_conflict_count,
             cleaned_run_count=self.cleaned_run_count,
+            cleaned_job_count=self.cleaned_job_count,
             last_sync_at=self.last_sync_at,
             last_dispatch_started_at=self.last_dispatch_started_at,
             last_dispatch_finished_at=self.last_dispatch_finished_at,
             last_cleanup_at=self.last_cleanup_at,
+            last_job_cleanup_at=self.last_job_cleanup_at,
         )

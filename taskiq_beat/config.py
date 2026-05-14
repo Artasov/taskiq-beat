@@ -20,6 +20,8 @@ class SchedulerConfig:
     record_runs: bool = True
     run_history_retention_days: int | None = None
     run_cleanup_interval_seconds: float = 3600.0
+    completed_job_retention_days: int | None = None
+    job_cleanup_interval_seconds: float = 3600.0
     default_timezone: str = DEFAULT_TIMEZONE
 
     def __post_init__(self) -> None:
@@ -42,3 +44,7 @@ class SchedulerConfig:
             raise ValueError("run_history_retention_days must be greater than or equal to zero.")
         if self.run_cleanup_interval_seconds <= 0:
             raise ValueError("run_cleanup_interval_seconds must be positive.")
+        if self.completed_job_retention_days is not None and self.completed_job_retention_days < 0:
+            raise ValueError("completed_job_retention_days must be greater than or equal to zero.")
+        if self.job_cleanup_interval_seconds <= 0:
+            raise ValueError("job_cleanup_interval_seconds must be positive.")

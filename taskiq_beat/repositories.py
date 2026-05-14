@@ -106,6 +106,30 @@ class JobRepository:
         result = await session.execute(statement)
         return int(getattr(result, "rowcount", 0) or 0)
 
+    @classmethod
+    async def purge_completed_one_off_before(
+            cls,
+            session: AsyncSession,
+            updated_before: datetime,
+    ) -> tuple[int, list[str]]:
+        """Delete old terminal one-off jobs and their run history."""
+        candidate_query = select(SchedulerJob.id).where(
+            SchedulerJob.kind == "one_off",
+            SchedulerJob.is_enabled.is_(False),
+            SchedulerJob.next_run_at.is_(None),
+            SchedulerJob.claimed_by.is_(None),
+            SchedulerJob.claimed_at.is_(None),
+            SchedulerJob.claim_expires_at.is_(None),
+            SchedulerJob.dispatch_count > 0,
+            SchedulerJob.updated_at < updated_before,
+        )
+        job_ids = list((await session.execute(candidate_query)).scalars())
+        if not job_ids:
+            return 0, []
+        await session.execute(delete(SchedulerRun).where(SchedulerRun.job_id.in_(job_ids)))
+        result = await session.execute(delete(SchedulerJob).where(SchedulerJob.id.in_(job_ids)))
+        return int(getattr(result, "rowcount", 0) or 0), job_ids
+
 
 class RunRepository:
     """Database helpers for scheduler execution history."""
