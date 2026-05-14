@@ -17,6 +17,7 @@
 
 - [Quick start](#quick-start)
 - [How to run it](#how-to-run-it)
+- [Task autodiscovery](#task-autodiscovery)
 - [Run with FastAPI](#run-with-fastapi)
 - [Create jobs](#create-jobs)
 - [Task chains](#task-chains)
@@ -156,6 +157,31 @@ If the worker is not running, the scheduler can publish tasks into the broker, b
 
 If you want to run the scheduler separately instead of inside FastAPI, that is also possible.
 Then one process keeps `scheduler_app.start()`, and another process still remains the Taskiq worker.
+
+## Task autodiscovery
+
+Use `TaskDiscovery` when task modules live in packages like `src.modules.*.tasks`.
+
+```python
+# src/core/tasks/discovery.py
+from taskiq_beat import TaskDiscovery
+
+from src.core.tasks.broker import broker
+
+task_discovery = TaskDiscovery(broker=broker, packages=["src.modules"])
+TASK_MODULES = task_discovery.import_modules()
+```
+
+Run the worker with the broker and the discovery module:
+
+```bash
+taskiq worker src.core.tasks.broker:broker src.core.tasks.discovery
+uv run taskiq worker src.core.tasks.broker:broker src.core.tasks.discovery
+poetry run taskiq worker src.core.tasks.broker:broker src.core.tasks.discovery
+```
+
+`TaskDiscovery` imports discovered modules and logs module count, module names, task count, and task names from
+`broker.local_task_registry`.
 
 ## Run with FastAPI
 

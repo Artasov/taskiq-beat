@@ -17,6 +17,7 @@
 
 - [Быстрый старт](#быстрый-старт)
 - [Как это запускать](#как-это-запускать)
+- [Автодискавери задач](#автодискавери-задач)
 - [Запуск с FastAPI](#запуск-с-fastapi)
 - [Создание job](#создание-job)
 - [Цепочки задач](#цепочки-задач)
@@ -157,6 +158,31 @@ python -m taskiq worker app.main:broker
 
 Если хочется запускать scheduler не внутри FastAPI, а отдельно, это тоже можно делать.
 Тогда один process держит `scheduler_app.start()`, а второй process всё равно остаётся Taskiq worker.
+
+## Автодискавери задач
+
+Используй `TaskDiscovery`, если task-модули лежат в пакетах вида `src.modules.*.tasks`.
+
+```python
+# src/core/tasks/discovery.py
+from taskiq_beat import TaskDiscovery
+
+from src.core.tasks.broker import broker
+
+task_discovery = TaskDiscovery(broker=broker, packages=["src.modules"])
+TASK_MODULES = task_discovery.import_modules()
+```
+
+Запуск worker с broker и discovery-модулем:
+
+```bash
+taskiq worker src.core.tasks.broker:broker src.core.tasks.discovery
+uv run taskiq worker src.core.tasks.broker:broker src.core.tasks.discovery
+poetry run taskiq worker src.core.tasks.broker:broker src.core.tasks.discovery
+```
+
+`TaskDiscovery` импортирует найденные модули и логирует количество модулей, их import path-ы, количество задач и task
+names из `broker.local_task_registry`.
 
 ## Запуск с FastAPI
 
