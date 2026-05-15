@@ -221,7 +221,7 @@ class SchedulerEngine:
         current_time = datetime.now(UTC)
         self.last_sync_at = current_time
         self.sync_count += 1
-        log.info("Scheduler engine synced jobs from storage.", extra={"active_job_count": len(active_jobs)})
+        log.debug("Scheduler engine synced jobs from storage.", extra={"active_job_count": len(active_jobs)})
 
     def merge_jobs(self, jobs: list[SchedulerJob]) -> None:
         """Merge storage rows into in-memory state and wakeup heap."""

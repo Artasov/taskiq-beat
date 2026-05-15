@@ -206,6 +206,34 @@ async def test_engine_logs_dispatch_lifecycle(
 
 
 @pytest.mark.asyncio()
+async def test_engine_sync_log_is_debug(session_factory, scheduler_app: SchedulerApp, log_capture) -> None:
+    log_capture.set_level(logging.INFO, logger="taskiq_beat.engine")
+
+    await scheduler_app.engine.sync_all()
+
+    info_messages = [
+        record.getMessage()
+        for record in log_capture.records
+        if record.name == "taskiq_beat.engine"
+    ]
+
+    assert "Scheduler engine synced jobs from storage." not in info_messages
+
+    log_capture.clear()
+    log_capture.set_level(logging.DEBUG, logger="taskiq_beat.engine")
+
+    await scheduler_app.engine.sync_all()
+
+    debug_messages = [
+        record.getMessage()
+        for record in log_capture.records
+        if record.name == "taskiq_beat.engine"
+    ]
+
+    assert "Scheduler engine synced jobs from storage." in debug_messages
+
+
+@pytest.mark.asyncio()
 async def test_engine_claims_job_once_across_multiple_schedulers(monkeypatch, session_factory, broker) -> None:
     dispatched: list[str] = []
 
