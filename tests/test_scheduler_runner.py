@@ -57,6 +57,33 @@ def test_cli_builds_runner_from_import_path(
     assert len(runner.startup_hooks) == 1
 
 
+def test_cli_loads_scheduler_app_from_current_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory,
+) -> None:
+    module_path = tmp_path / "cwd_scheduler_app.py"
+    module_path.write_text(
+        "\n".join(
+            [
+                "from taskiq import InMemoryBroker",
+                "from taskiq_beat import SchedulerApp",
+                "from tests.test_scheduler_runner import SESSION_FACTORY",
+                "broker = InMemoryBroker()",
+                "scheduler_app = SchedulerApp(broker=broker, session_factory=SESSION_FACTORY)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "SESSION_FACTORY", session_factory, raising=False)
+    monkeypatch.setattr(sys, "path", [path for path in sys.path if path not in ("", ".")])
+
+    runner = SchedulerRunnerCli.build_runner(["cwd_scheduler_app:scheduler_app"])
+
+    assert isinstance(runner, SchedulerRunner)
+
+
 @pytest.mark.asyncio()
 async def test_runner_starts_and_stops_scheduler(session_factory) -> None:
     broker = InMemoryBroker()

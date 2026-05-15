@@ -70,7 +70,7 @@ class Scheduler:
                 "job_id": str(job.id),
                 "task_name": job.task_name,
                 "kind": job.kind,
-                "created": existing_job is None,
+                "job_created": existing_job is None,
             },
         )
         return job

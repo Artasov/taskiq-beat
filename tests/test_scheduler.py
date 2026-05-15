@@ -137,8 +137,9 @@ async def test_single_builder_pause_resume_run_now_and_delete(db_session, schedu
 
 @pytest.mark.asyncio()
 async def test_single_builder_upsert_creates_and_updates_job_without_duplicates(
-    db_session, scheduler_app: SchedulerApp
+    db_session, scheduler_app: SchedulerApp, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO, logger="taskiq_beat.scheduler")
     task = scheduler_app.registry.get_task("tests.echo")
     job = await scheduler_app.single(task=task).upsert(
         db_session,
