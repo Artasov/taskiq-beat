@@ -5,7 +5,9 @@ import asyncio
 import importlib
 import inspect
 import logging
+import os
 import signal
+import sys
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from typing import Any
@@ -103,6 +105,13 @@ class SchedulerRunnerCli:
     """CLI parser for the standalone scheduler runner."""
 
     @staticmethod
+    def add_current_directory_to_import_path() -> None:
+        """Make app import paths work when the runner is launched as a console script."""
+        current_directory = os.getcwd()
+        if current_directory not in sys.path:
+            sys.path.insert(0, current_directory)
+
+    @staticmethod
     def build_parser() -> argparse.ArgumentParser:
         """Create the command line parser."""
         parser = argparse.ArgumentParser(
@@ -128,6 +137,7 @@ class SchedulerRunnerCli:
     def build_runner(cls, argv: Sequence[str] | None = None) -> SchedulerRunner:
         """Load CLI targets and create a SchedulerRunner."""
         args = cls.build_parser().parse_args(argv)
+        cls.add_current_directory_to_import_path()
         logging.basicConfig(
             level=getattr(logging, args.log_level.upper(), logging.INFO),
             format="%(levelname)s:     %(message)s",
