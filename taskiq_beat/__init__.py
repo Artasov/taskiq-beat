@@ -12,6 +12,7 @@ from taskiq_beat.config import DEFAULT_TIMEZONE, SchedulerConfig
 from taskiq_beat.discovery import TaskDiscovery, discover_task_modules
 from taskiq_beat.engine import SchedulerHealthSnapshot
 from taskiq_beat.models import SchedulerBase, SchedulerJob, SchedulerRun
+from taskiq_beat.scheduler_runner import ImportPathResolver, SchedulerRunner, SchedulerRunnerCli
 from taskiq_beat.triggers import CrontabTrigger, ImmediateDispatch, IntervalTrigger, OneOffSchedule, PeriodicSchedule
 
 __all__ = (
@@ -24,6 +25,7 @@ __all__ = (
     "DEFAULT_TIMEZONE",
     "ImmediateDispatch",
     "IntervalTrigger",
+    "ImportPathResolver",
     "OneOffSchedule",
     "PeriodicSchedule",
     "SchedulerApp",
@@ -31,6 +33,8 @@ __all__ = (
     "SchedulerConfig",
     "SchedulerHealthSnapshot",
     "SchedulerJob",
+    "SchedulerRunner",
+    "SchedulerRunnerCli",
     "SchedulerRun",
     "SingleScheduleBuilder",
     "TaskChain",

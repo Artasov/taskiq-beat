@@ -158,6 +158,22 @@ If the worker is not running, the scheduler can publish tasks into the broker, b
 If you want to run the scheduler separately instead of inside FastAPI, that is also possible.
 Then one process keeps `scheduler_app.start()`, and another process still remains the Taskiq worker.
 
+For a separate scheduler process, `taskiq-beat` provides a scheduler runner:
+
+```bash
+python -m taskiq_beat.scheduler_runner app.scheduler:scheduler_app
+taskiq-beat-scheduler app.scheduler:scheduler_app
+```
+
+If the application needs to upsert periodic jobs before the loop starts, pass one or more startup hooks:
+
+```bash
+taskiq-beat-scheduler app.scheduler:scheduler_app --startup app.replication:upsert_schedules
+```
+
+The runner calls `scheduler_app.broker.startup()`, then `scheduler_app.start()`, waits for `SIGINT`/`SIGTERM`, and
+shuts both down in the reverse order. Pass `--skip-broker-lifespan` if another layer owns broker startup/shutdown.
+
 ## Task autodiscovery
 
 Use `TaskDiscovery` when task modules live in packages like `src.modules.*.tasks`.
@@ -551,10 +567,11 @@ This will show logs from `taskiq_beat.app`, `taskiq_beat.scheduler`, and `taskiq
 Typical events that are logged:
 
 - scheduler app start and stop
-- scheduler engine sync from storage
 - scheduler job create, upsert, pause, resume, run-now, delete
 - successful dispatches
 - dispatch failures with retry scheduling
+
+High-frequency engine sync logs are emitted at `DEBUG` level.
 
 If your worker and API run in containers, it is usually enough to log to stdout and collect logs from Docker or Kubernetes.
 

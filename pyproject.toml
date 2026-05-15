@@ -41,6 +41,9 @@ dependencies = [
     "taskiq>=0.12.0",
 ]
 
+[project.scripts]
+taskiq-beat-scheduler = "taskiq_beat.scheduler_runner:main"
+
 [project.optional-dependencies]
 test = [
     "aiosqlite>=0.20.0",

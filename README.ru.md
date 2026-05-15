@@ -233,6 +233,22 @@ app = FastAPI(lifespan=lifespan)
 
 Можно и так, и так. Главное правило: не запускать несколько scheduler processes на одну и ту же базу.
 
+Для отдельного scheduler-процесса `taskiq-beat` даёт готовый scheduler runner:
+
+```bash
+python -m taskiq_beat.scheduler_runner app.scheduler:scheduler_app
+taskiq-beat-scheduler app.scheduler:scheduler_app
+```
+
+Если приложению нужно создать periodic jobs перед стартом loop, передай один или несколько startup hooks:
+
+```bash
+taskiq-beat-scheduler app.scheduler:scheduler_app --startup app.replication:upsert_schedules
+```
+
+Runner вызывает `scheduler_app.broker.startup()`, потом `scheduler_app.start()`, ждёт `SIGINT`/`SIGTERM`, а при остановке
+закрывает всё в обратном порядке. Если broker lifecycle контролируется другим слоем, передай `--skip-broker-lifespan`.
+
 ## Создание job
 
 Публичный API `SchedulerApp` построен на двух builder-ах:
@@ -550,10 +566,11 @@ logging.basicConfig(
 Что логируется:
 
 - старт и остановка scheduler app
-- sync scheduler engine с хранилищем
 - create, upsert, pause, resume, run-now, delete для job
 - успешные dispatch'и
 - ошибки dispatch'а и постановка retry
+
+Частые sync-логи scheduler engine пишутся на уровне `DEBUG`.
 
 Если worker и API запущены в контейнерах, обычно достаточно писать в stdout и собирать логи уже на уровне Docker или Kubernetes.
 
