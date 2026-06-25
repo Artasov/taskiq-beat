@@ -99,6 +99,73 @@ async def test_engine_retries_after_dispatch_error(monkeypatch, session_factory,
 
 
 @pytest.mark.asyncio()
+async def test_engine_continues_batch_after_unknown_task(
+    monkeypatch,
+    session_factory,
+    scheduler_app: SchedulerApp,
+) -> None:
+    dispatched: list[str] = []
+    task = scheduler_app.registry.get_task("tests.ping")
+
+    async def fake_kiq(*_args, **_kwargs):
+        dispatched.append("called")
+
+        class Result:
+            task_id = "task-known"
+
+        return Result()
+
+    monkeypatch.setattr(task, "kiq", fake_kiq)
+    current_time = datetime.now(UTC)
+
+    async with session_factory() as session:
+        unknown_job = SchedulerJob(
+            id="unknown-task-job",
+            task_name="tests.unknown",
+            kind="one_off",
+            strategy="one_off",
+            trigger_payload={"run_at": current_time.isoformat()},
+            task_args=[],
+            task_kwargs={},
+            metadata_payload={},
+            is_enabled=True,
+            next_run_at=current_time - timedelta(seconds=1),
+            dispatch_count=0,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+        session.add(unknown_job)
+        known_job = await scheduler_app.single(task=task).schedule(
+            session,
+            trigger=OneOffSchedule(run_at=current_time - timedelta(seconds=1)),
+        )
+
+    await scheduler_app.engine.sync_all()
+    await scheduler_app.engine.run_once()
+
+    async with session_factory() as session:
+        stored_unknown = await scheduler_app.get_job(session, "unknown-task-job")
+        stored_known = await scheduler_app.get_job(session, known_job.id)
+        runs = {
+            run.job_id: run
+            for run in (
+                (
+                    await session.execute(select(SchedulerRun))
+                ).scalars()
+            )
+        }
+
+    assert dispatched == ["called"]
+    assert stored_unknown.is_enabled is True
+    assert stored_unknown.next_run_at is not None
+    assert stored_unknown.last_error == "Task 'tests.unknown' is not registered in Taskiq."
+    assert stored_known.is_enabled is False
+    assert stored_known.dispatch_count == 1
+    assert runs[known_job.id].status == "dispatched"
+    assert runs["unknown-task-job"].status == "failed"
+
+
+@pytest.mark.asyncio()
 async def test_engine_restores_jobs_from_storage(session_factory, scheduler_app: SchedulerApp) -> None:
     task = scheduler_app.registry.get_task("tests.ping")
 

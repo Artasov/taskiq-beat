@@ -160,6 +160,7 @@ class SchedulerEngine:
         await self.sync_all()
         self.stop_event.clear()
         self.runner_task = asyncio.create_task(self.run())
+        self.runner_task.add_done_callback(self.log_runner_failure)
         log.info("Scheduler engine started.")
 
     async def stop(self) -> None:
@@ -176,8 +177,25 @@ class SchedulerEngine:
     async def run(self) -> None:
         """Main polling loop for sync, dispatch, and cleanup."""
         while not self.stop_event.is_set():
-            await self.run_once()
+            try:
+                await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Scheduler engine iteration failed; retrying.")
             await self.wait_next_tick()
+
+    @staticmethod
+    def log_runner_failure(task: asyncio.Task[None]) -> None:
+        """Log unexpected runner task failures that would otherwise be hidden."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error(
+                "Scheduler engine runner stopped with an unhandled error.",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     async def run_once(self) -> None:
         """Execute one engine iteration."""
@@ -241,6 +259,10 @@ class SchedulerEngine:
     def upsert_job(self, job: SchedulerJob) -> None:
         """Apply a single job update to in-memory state and wake up the loop."""
         state = SchedulerJobState.from_job(job)
+        self.upsert_job_state(state)
+
+    def upsert_job_state(self, state: SchedulerJobState) -> None:
+        """Apply a single job state update to memory and wake up the loop."""
         self.jobs[state.job_id] = state
         wake_at = state.get_wake_at(self.scheduler_id)
         if wake_at is not None:
@@ -330,6 +352,8 @@ class SchedulerEngine:
             return
 
         prepared_dispatches: list[PreparedDispatch] = []
+        preparation_runs_to_create: list[SchedulerRun] = []
+        failed_preparation_states: list[SchedulerJobState] = []
         async with self.session_factory() as claim_session:
             for job in claim_candidates:
                 claimed_job = await JobRepository.claim_for_dispatch(
@@ -347,8 +371,8 @@ class SchedulerEngine:
                         self.upsert_job(refreshed_job)
                         self.claim_conflict_count += 1
                     continue
-                prepared_dispatches.append(
-                    PreparedDispatch(
+                try:
+                    prepared_dispatch = PreparedDispatch(
                         job_id=str(claimed_job.id),
                         task_name=claimed_job.task_name,
                         task=self.registry.get_task(claimed_job.task_name),
@@ -357,9 +381,26 @@ class SchedulerEngine:
                         kwargs=dict(claimed_job.task_kwargs or {}),
                         scheduled_for=claimed_job.next_run_at or current_time,
                         claim_started_at=current_time,
-                    ),
+                    )
+                except Exception as exc:
+                    self.apply_preparation_error(
+                        job=claimed_job,
+                        error=exc,
+                        scheduled_for=claimed_job.next_run_at or current_time,
+                        current_time=current_time,
+                        runs_to_create=preparation_runs_to_create,
+                    )
+                    failed_preparation_states.append(SchedulerJobState.from_job(claimed_job))
+                    continue
+                prepared_dispatches.append(
+                    prepared_dispatch,
                 )
+            if self.config.record_runs:
+                await RunRepository.create_many(claim_session, preparation_runs_to_create)
             await claim_session.commit()
+
+        for state in failed_preparation_states:
+            self.upsert_job_state(state)
 
         if not prepared_dispatches:
             self.last_dispatch_finished_at = datetime.now(UTC)
@@ -563,6 +604,46 @@ class SchedulerEngine:
                     broker_task_id=outcome.broker_task_id,
                     created_at=finished_at,
                     updated_at=finished_at,
+                ),
+            )
+
+    def apply_preparation_error(
+            self,
+            *,
+            job: SchedulerJob,
+            error: Exception,
+            scheduled_for: datetime,
+            current_time: datetime,
+            runs_to_create: list[SchedulerRun],
+    ) -> None:
+        """Persist a retry state when a claimed job cannot be prepared for dispatch."""
+        retry_at = current_time + timedelta(seconds=self.config.dispatch_retry_seconds)
+        job.claimed_by = None
+        job.claimed_at = None
+        job.claim_expires_at = None
+        job.last_error = str(error)
+        job.next_run_at = retry_at
+        job.updated_at = current_time
+        self.failed_dispatch_count += 1
+        log.exception(
+            "Scheduler job preparation failed; retry scheduled.",
+            extra={
+                "job_id": str(job.id),
+                "task_name": job.task_name,
+                "retry_at": retry_at.isoformat(),
+            },
+        )
+        if self.config.record_runs:
+            runs_to_create.append(
+                SchedulerRun(
+                    job_id=job.id,
+                    status="failed",
+                    scheduled_for=scheduled_for,
+                    dispatched_at=None,
+                    finished_at=current_time,
+                    error=str(error),
+                    created_at=current_time,
+                    updated_at=current_time,
                 ),
             )
 
