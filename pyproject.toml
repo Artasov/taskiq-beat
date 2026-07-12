@@ -8,10 +8,10 @@ dynamic = ["version"]
 description = "A database-backed scheduler and beat engine for Taskiq."
 readme = "README.md"
 requires-python = ">=3.12"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "MPL-2.0"
+license-files = ["LICENSE", "NOTICE", "TRADEMARKS.md"]
 authors = [
-    { name = "xlartas" },
+    { name = "Artasov" },
 ]
 urls = { Homepage = "https://github.com/Artasov/taskiq-beat", Repository = "https://github.com/Artasov/taskiq-beat", Issues = "https://github.com/Artasov/taskiq-beat/issues" }
 keywords = [

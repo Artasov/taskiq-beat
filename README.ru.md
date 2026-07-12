@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
   <h1>taskiq-beat</h1>
 </div>
 
@@ -10,6 +10,12 @@
     <img src="https://img.shields.io/badge/Русский-red?style=for-the-badge" alt="Русский">
   </a>
 </div>  
+
+<div align="center">
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg" alt="Лицензия: MPL 2.0">
+  </a>
+</div>
 
 ### Планировщик для Taskiq с хранением расписания и истории запусков в базе данных
 
@@ -631,3 +637,9 @@ async with engine.begin() as connection:
 ```bash
 pytest
 ```
+
+## Лицензия
+
+Проект распространяется по [Mozilla Public License 2.0](./LICENSE). Коммерческое использование
+разрешено; изменения файлов под MPL остаются на условиях MPL. См. [NOTICE](./NOTICE) и
+[TRADEMARKS.md](./TRADEMARKS.md).

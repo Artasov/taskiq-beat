@@ -1,5 +1,7 @@
 include LICENSE
+include NOTICE
 include README.md
 include README.ru.md
+include TRADEMARKS.md
 include taskiq_beat/py.typed
 recursive-include scripts *.md *.py

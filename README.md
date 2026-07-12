@@ -11,6 +11,12 @@
   </a>
 </div>  
 
+<div align="center">
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg" alt="License: MPL 2.0">
+  </a>
+</div>
+
 ### Scheduler for Taskiq with schedules and run history stored in the database
 
 ## Navigation
@@ -632,3 +638,9 @@ See [scripts/README.md](./scripts/README.md).
 ```bash
 pytest
 ```
+
+## License
+
+Licensed under the [Mozilla Public License 2.0](./LICENSE). Commercial use is permitted; changes
+to MPL-covered files remain subject to the MPL. See [NOTICE](./NOTICE) and
+[TRADEMARKS.md](./TRADEMARKS.md).
