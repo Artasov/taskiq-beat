@@ -37,6 +37,7 @@ class Scheduler:
     is_enabled: bool = True
     registry: TaskRegistry | None = None
     engine: SchedulerEngine | None = None
+    record_runs: bool = True
 
     async def schedule(self, session: AsyncSession) -> SchedulerJob:
         """Create a new job row from this scheduler definition."""
@@ -121,9 +122,9 @@ class Scheduler:
         return error
 
     def should_record_runs(self) -> bool:
-        """Return True when the bound engine is configured to write run history."""
+        """Read the history policy from the runtime or the standalone producer."""
         if self.engine is None:
-            return True
+            return self.record_runs
         return self.engine.config.record_runs
 
     def build_new_job(self) -> SchedulerJob:

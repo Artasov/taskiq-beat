@@ -13,14 +13,14 @@ from taskiq_beat.triggers import ImmediateDispatch
 from taskiq_beat.types import TaskReference
 
 if TYPE_CHECKING:
-    from taskiq_beat.app import SchedulerApp
+    from taskiq_beat.app import SchedulerClient
 
 
 @dataclass(slots=True)
 class SingleScheduleBuilder:
     """Fluent builder that describes a single-task schedule for an app."""
 
-    app: SchedulerApp
+    app: SchedulerClient
     task: TaskReference
     args: list[object] = field(default_factory=list)
     kwargs: dict[str, object] = field(default_factory=dict)
@@ -86,6 +86,7 @@ class SingleScheduleBuilder:
             is_enabled=is_enabled,
             registry=self.app.registry,
             engine=self.app.engine,
+            record_runs=self.app.config.record_runs,
         )
 
 
@@ -93,7 +94,7 @@ class SingleScheduleBuilder:
 class ChainScheduleBuilder:
     """Fluent builder that describes a task-chain schedule for an app."""
 
-    app: SchedulerApp
+    app: SchedulerClient
     chain: TaskChain
     metadata: dict[str, object] = field(default_factory=dict)
 
@@ -163,11 +164,12 @@ class ChainScheduleBuilder:
             is_enabled=is_enabled,
             registry=self.app.registry,
             engine=self.app.engine,
+            record_runs=self.app.config.record_runs,
         )
 
 
 def make_single_builder(
-        app: SchedulerApp,
+        app: SchedulerClient,
         *,
         task: TaskReference,
         args: Sequence[object] | None = None,
@@ -185,7 +187,7 @@ def make_single_builder(
 
 
 def make_chain_builder(
-        app: SchedulerApp,
+        app: SchedulerClient,
         *,
         steps: Sequence[ChainStep],
         on_failure: ChainFailurePolicy = "stop",
