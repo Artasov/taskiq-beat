@@ -180,6 +180,56 @@ taskiq-beat-scheduler app.scheduler:scheduler_app --startup app.replication:upse
 The runner calls `scheduler_app.broker.startup()`, then `scheduler_app.start()`, waits for `SIGINT`/`SIGTERM`, and
 shuts both down in the reverse order. Pass `--skip-broker-lifespan` if another layer owns broker startup/shutdown.
 
+### Separate API, scheduler and worker
+
+Create one broker and session factory per process in your application's infrastructure module.
+Use a client in the API to persist schedules and publish immediate jobs:
+
+```python
+from taskiq_beat import SchedulerClient, SchedulerConfig
+from app.infrastructure import broker, session_factory
+
+client = SchedulerClient(broker=broker, session_factory=session_factory, config=SchedulerConfig.from_env())
+```
+
+Pass the decorated task to `client.single(task=send_email)`. Importing that task registers it
+on the broker and preserves its routing labels. String names also work for registered tasks.
+The client has no scheduler engine or task discovery. It uses the session passed to
+`schedule()` or `upsert()`, and `ImmediateDispatch` publishes during the call.
+
+Declare the background processes in a separate module:
+
+```python
+# app/background.py
+from taskiq_beat import SchedulerApp, SchedulerConfig
+from app.infrastructure import broker, session_factory
+
+app = SchedulerApp(
+    broker=broker,
+    session_factory=session_factory,
+    config=SchedulerConfig.from_env(),
+    task_modules=("app.mail.tasks", "app.billing.tasks"),
+    bootstrap_modules=("app.models",),
+)
+
+def worker_broker():
+    return app.worker_broker()
+```
+
+```bash
+taskiq worker app.background:worker_broker
+taskiq-beat-scheduler app.background:app --startup app.schedules:sync --retry-delay 2
+```
+
+The worker factory and scheduler load the declared modules at startup, with bootstrap modules
+first. The scheduler runs startup hooks after task registration and before starting its engine.
+The optional retry delay is in seconds and applies to transient startup failures.
+
+`SchedulerConfig.from_env()` reads overrides such as `TASKIQ_SCHEDULER_ID`,
+`TASKIQ_SCHEDULER_DISPATCH_BATCH_SIZE` and `TASKIQ_SCHEDULER_RUN_HISTORY_RETENTION_DAYS`.
+Pass `defaults=SchedulerConfig(...)` for application defaults, `prefix=` for another prefix,
+or `environ=` for a settings mapping. Empty values use the default. Use `none` to disable a retention limit.
+
 ## Task autodiscovery
 
 Use `TaskDiscovery` when task modules live in packages like `src.modules.*.tasks`.

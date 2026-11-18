@@ -255,6 +255,48 @@ taskiq-beat-scheduler app.scheduler:scheduler_app --startup app.replication:upse
 Runner вызывает `scheduler_app.broker.startup()`, потом `scheduler_app.start()`, ждёт `SIGINT`/`SIGTERM`, а при остановке
 закрывает всё в обратном порядке. Если broker lifecycle контролируется другим слоем, передай `--skip-broker-lifespan`.
 
+### API, scheduler и worker в отдельных процессах
+
+Создайте общий модуль с брокером и фабрикой сессий. В API используйте
+`SchedulerClient(broker=broker, session_factory=session_factory, config=SchedulerConfig.from_env())`.
+Клиент сохраняет расписания через переданную сессию. При `ImmediateDispatch` он отправляет задачу
+в брокер в рамках вызова и учитывает результат отправки. У клиента нет engine и полного discovery.
+Передайте в `client.single(task=send_email)` декорированную задачу из её модуля.
+Строковое имя тоже подходит, если задача уже зарегистрирована в этом брокере.
+
+Для фоновых процессов объявите каталог отдельно:
+
+```python
+# app/background.py
+from taskiq_beat import SchedulerApp, SchedulerConfig
+from app.infrastructure import broker, session_factory
+
+app = SchedulerApp(
+    broker=broker,
+    session_factory=session_factory,
+    config=SchedulerConfig.from_env(),
+    task_modules=("app.mail.tasks", "app.billing.tasks"),
+    bootstrap_modules=("app.models",),
+)
+
+def worker_broker():
+    return app.worker_broker()
+```
+
+```bash
+taskiq worker app.background:worker_broker
+taskiq-beat-scheduler app.background:app --startup app.schedules:sync --retry-delay 2
+```
+
+Worker и scheduler импортируют bootstrap-модули перед модулями задач. Scheduler выполняет
+startup hooks после загрузки задач, до запуска цикла. Параметр `--retry-delay` задаёт паузу
+в секундах перед повторным запуском при временной недоступности инфраструктуры.
+
+`SchedulerConfig.from_env()` читает переопределения с префиксом `TASKIQ_SCHEDULER_`, например
+`TASKIQ_SCHEDULER_ID` и `TASKIQ_SCHEDULER_DISPATCH_BATCH_SIZE`. Для собственных начальных значений
+передайте `defaults=SchedulerConfig(...)`, для другого префикса — `prefix=`, для словаря настроек —
+`environ=`. Пустое значение сохраняет исходную настройку. Значение `none` отключает лимит хранения.
+
 ## Создание job
 
 Публичный API `SchedulerApp` построен на двух builder-ах:

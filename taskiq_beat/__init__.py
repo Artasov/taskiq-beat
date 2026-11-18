@@ -1,5 +1,5 @@
 from taskiq_beat._version import __version__
-from taskiq_beat.app import SchedulerApp
+from taskiq_beat.app import SchedulerApp, SchedulerClient
 from taskiq_beat.builders import ChainScheduleBuilder, SingleScheduleBuilder
 from taskiq_beat.chains import (
     CHAIN_ORCHESTRATOR_TASK_NAME,
@@ -30,6 +30,7 @@ __all__ = (
     "PeriodicSchedule",
     "SchedulerApp",
     "SchedulerBase",
+    "SchedulerClient",
     "SchedulerConfig",
     "SchedulerHealthSnapshot",
     "SchedulerJob",

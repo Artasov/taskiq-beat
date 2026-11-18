@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from taskiq_beat import TaskDiscovery, discover_task_modules
+from taskiq_beat.discovery import TaskModuleLoader
 
 
 def write_package(path: Path) -> None:
@@ -70,6 +71,14 @@ def test_task_discovery_finds_module_and_package_tasks(tmp_path: Path, monkeypat
         f"{package_name}.modules.chat.tasks.nested",
         f"{package_name}.modules.chat.tasks.nested.cleanup",
     )
+
+
+def test_explicit_catalog_imports_bootstrap_then_only_declared_modules_once(broker, monkeypatch) -> None:
+    imported: list[str] = []
+    monkeypatch.setattr(importlib, "import_module", imported.append)
+    loader = TaskModuleLoader(broker, ("domain.a.tasks", "domain.b.tasks"), ("domain.models",))
+    assert loader() == loader() == ("domain.a.tasks", "domain.b.tasks")
+    assert imported == ["domain.models", "domain.a.tasks", "domain.b.tasks"]
 
 
 def test_task_discovery_imports_modules_and_logs_tasks(

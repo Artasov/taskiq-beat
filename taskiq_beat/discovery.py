@@ -5,7 +5,7 @@ import importlib.util
 import logging
 import pkgutil
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from taskiq_beat.types import TaskiqBroker
 
@@ -93,6 +93,26 @@ class TaskDiscovery:
         if not values:
             return "  <empty>"
         return "\n".join(f"  - {value}" for value in values)
+
+
+@dataclass(slots=True)
+class TaskModuleLoader:
+    """Import an explicit catalog once, after the application's bootstrap modules."""
+
+    broker: TaskiqBroker
+    modules: Sequence[str]
+    bootstrap_modules: Sequence[str] = ()
+    _loaded: tuple[str, ...] | None = field(default=None, init=False)
+
+    def __call__(self) -> tuple[str, ...]:
+        if self._loaded is None:
+            modules = tuple(self.modules)
+            for module in (*self.bootstrap_modules, *modules):
+                importlib.import_module(module)
+            discovery = TaskDiscovery(packages=(), broker=self.broker)
+            log.info(discovery.log_message(module_names=modules, task_names=discovery.task_names()))
+            self._loaded = modules
+        return self._loaded
 
 
 def discover_task_modules(

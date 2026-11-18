@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, replace
+from typing import Any, Self, get_type_hints
 from uuid import uuid4
 
 DEFAULT_TIMEZONE = "UTC"
@@ -23,6 +26,38 @@ class SchedulerConfig:
     completed_job_retention_days: int | None = None
     job_cleanup_interval_seconds: float = 3600.0
     default_timezone: str = DEFAULT_TIMEZONE
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        prefix: str = "TASKIQ_SCHEDULER_",
+        environ: Mapping[str, str] | None = None,
+        defaults: Self | None = None,
+    ) -> Self:
+        """Apply non-empty environment overrides to an existing or default config."""
+        source = os.environ if environ is None else environ
+        overrides: dict[str, Any] = {}
+        types = get_type_hints(cls)
+        for option in fields(cls):
+            key = prefix + option.name.removeprefix("scheduler_").upper()
+            value = source.get(key, "").strip()
+            if not value:
+                continue
+            value_type = types[option.name]
+            try:
+                if value_type is bool:
+                    overrides[option.name] = {
+                        "true": True, "1": True, "yes": True, "on": True,
+                        "false": False, "0": False, "no": False, "off": False,
+                    }[value.lower()]
+                elif value_type == (int | None):
+                    overrides[option.name] = None if value.lower() == "none" else int(value)
+                else:
+                    overrides[option.name] = value_type(value)
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"Invalid value for {key}: {value!r}") from exc
+        return replace(defaults if defaults is not None else cls(), **overrides)
 
     def __post_init__(self) -> None:
         """Validate numeric limits eagerly to fail fast on bad config."""
